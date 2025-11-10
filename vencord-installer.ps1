@@ -351,7 +351,7 @@ $form.Controls.AddRange(@($btnInstall,$btnCancel)); $y += 50
 
 # Log output
 $lblLog = New-Object System.Windows.Forms.Label; $lblLog.Text = 'Log'; $lblLog.Location = New-Object System.Drawing.Point(12,$y); $lblLog.AutoSize = $true
-$txtLog = New-Object System.Windows.Forms.TextBox; $txtLog.Location = New-Object System.Drawing.Point(12,$y+20); $txtLog.Size = New-Object System.Drawing.Size(768,180); $txtLog.Multiline = $true; $txtLog.ScrollBars='Vertical'; $txtLog.ReadOnly=$true; $txtLog.Anchor='Top,Left,Right,Bottom'
+$txtLog = New-Object System.Windows.Forms.TextBox; $txtLog.Location = New-Object System.Drawing.Point -ArgumentList 12, ($y + 20); $txtLog.Size = New-Object System.Drawing.Size(768,180); $txtLog.Multiline = $true; $txtLog.ScrollBars='Vertical'; $txtLog.ReadOnly=$true; $txtLog.Anchor='Top,Left,Right,Bottom'
 $form.Controls.AddRange(@($lblLog,$txtLog))
 
 # --- Tool status update function ---
