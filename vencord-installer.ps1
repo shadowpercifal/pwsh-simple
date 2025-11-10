@@ -522,24 +522,27 @@ function Start-InjectElevatedConsole {
 
         $tempScript = Join-Path ([IO.Path]::GetTempPath()) ("vencord-inject-" + (Get-Random) + ".ps1")
         $lines = @()
-        $lines += "$ErrorActionPreference = 'Continue'"
-        $lines += "$host.ui.RawUI.WindowTitle = 'Vencord Inject (elevated)'"
-        $lines += "Set-Location -LiteralPath '" + ($RepoRoot.Replace("'","''")) + "'"
-        if ($nodeRoot) { $lines += "$env:Path = '" + ($nodeRoot.Replace("'","''")) + ";' + $env:Path" }
-        $lines += "Write-Host ('Working directory: ' + (Get-Location))"
-        $lines += "Write-Host 'Attempting to locate pnpm...'"
-        # If portable pnpm exists, use it first
-        $lines += "if (Test-Path -LiteralPath '" + ($pnpmExe.Replace("'","''")) + "') { Write-Host 'Using portable pnpm.exe'; & '" + ($pnpmExe.Replace("'","''")) + "' inject; return }"
-        # Try direct pnpm
-        $lines += "if (Get-Command pnpm -ErrorAction SilentlyContinue) { Write-Host ('Using pnpm from PATH: ' + (Get-Command pnpm).Path); pnpm inject; return }"
-        # Try corepack to prepare/activate pnpm
-        $lines += "if (Get-Command corepack -ErrorAction SilentlyContinue) {"
-        $lines += "  Write-Host 'Corepack found. Enabling and preparing pnpm...'"
-        $lines += "  try { corepack enable } catch { Write-Host ('corepack enable error: ' + $_.Exception.Message) }"
-        $lines += "  try { corepack prepare pnpm@latest --activate } catch { Write-Host ('corepack prepare error: ' + $_.Exception.Message) }"
-        $lines += "  if (Get-Command pnpm -ErrorAction SilentlyContinue) { Write-Host ('Using pnpm from Corepack: ' + (Get-Command pnpm).Path); pnpm inject; return }"
-        $lines += "}"
-        $lines += "Write-Host 'pnpm not found; cannot inject.'"
+        # Use single-quoted outer strings to prevent premature interpolation of $ in this parent script.
+        $lines += "$ErrorActionPreference = 'Stop'"
+        $lines += '$host.ui.RawUI.WindowTitle = "Vencord Inject (elevated)"'
+        $lines += ('Set-Location -LiteralPath "' + ($RepoRoot.Replace('"','\"')) + '"')
+        if ($nodeRoot) { $lines += ('$env:Path = "' + ($nodeRoot.Replace('"','\"')) + ';" + $env:Path') }
+        $lines += 'Write-Host "Working directory: $(Get-Location)"'
+        $lines += 'Write-Host "Attempting to locate pnpm..."'
+        $lines += ('if (Test-Path -LiteralPath "' + ($pnpmExe.Replace('"','\"')) + '") { Write-Host "Using portable pnpm.exe"; & "' + ($pnpmExe.Replace('"','\"')) + '" inject; Write-Host "Inject finished."; goto :done }')
+        $lines += 'if (Get-Command pnpm -ErrorAction SilentlyContinue) { Write-Host "Using pnpm from PATH: $(Get-Command pnpm).Path"; pnpm inject; Write-Host "Inject finished."; goto :done }'
+        $lines += ':corepack'
+        $lines += 'if (Get-Command corepack -ErrorAction SilentlyContinue) {'
+        $lines += '  Write-Host "Corepack found. Enabling and preparing pnpm..."'
+        $lines += '  try { corepack enable } catch { Write-Host "corepack enable error: $($_.Exception.Message)" }'
+        $lines += '  try { corepack prepare pnpm@latest --activate } catch { Write-Host "corepack prepare error: $($_.Exception.Message)" }'
+        $lines += '  if (Get-Command pnpm -ErrorAction SilentlyContinue) { Write-Host "Using pnpm from Corepack: $(Get-Command pnpm).Path"; pnpm inject; Write-Host "Inject finished."; goto :done }'
+        $lines += '}'
+        $lines += 'Write-Host "pnpm not found; cannot inject."'
+        $lines += ':done'
+        $lines += 'Write-Host "Injection script complete."'
+        $lines += 'Write-Host "Press Enter to close this window."'
+        $lines += 'Read-Host'
         Set-Content -LiteralPath $tempScript -Value ($lines -join [Environment]::NewLine) -Encoding UTF8
 
         Write-Log "Opening elevated console for 'pnpm inject'..."
