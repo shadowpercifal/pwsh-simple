@@ -51,18 +51,64 @@ function Clear-Directory {
     } catch {
         Write-Log "ERROR cleaning directory '$Path': $($_.Exception.Message)"
         return $false
-    }
-}
-
-function Write-Log {
-    param([string]$Message)
+        $downloadUrl = $null
+        if (-not $assetPath) {
+            Write-Log 'WARNING: Could not determine latest MinGit zip from releases page.'
+            # Fallback 1: GitHub API
+            try {
+                Write-Log 'Attempting GitHub API fallback for MinGit asset...'
+                $apiResponse = Invoke-WebRequest -Uri 'https://api.github.com/repos/git-for-windows/git/releases/latest' -UseBasicParsing -Headers @{ 'User-Agent'='VencordInstaller' } -ErrorAction Stop
+                $json = $apiResponse.Content | ConvertFrom-Json
+                if ($json -and $json.assets) {
+                    $apiAsset = $json.assets | Where-Object { $_.name -match '^MinGit-.*-64-bit\.zip$' } | Select-Object -First 1
+                    if (-not $apiAsset) { $apiAsset = $json.assets | Where-Object { $_.name -match '^MinGit-.*busybox-64-bit\.zip$' } | Select-Object -First 1 }
+                    if ($apiAsset) {
+                        $downloadUrl = $apiAsset.browser_download_url
+                        Write-Log ("Found MinGit via API: {0}" -f $apiAsset.name)
+                    } else {
+                        Write-Log 'GitHub API returned no matching MinGit assets.'
+                    }
+                } else {
+                    Write-Log 'GitHub API did not return expected JSON structure.'
+                }
+            } catch { Write-Log "GitHub API fallback failed: $($_.Exception.Message)" }
+            # Fallback 2: Static tag/version list with HEAD probing
+            if (-not $downloadUrl) {
+                Write-Log 'Trying static version list for MinGit...'
+                $fallbackTags = @('v2.47.0.windows.1','v2.46.0.windows.1','v2.45.1.windows.1','v2.45.0.windows.1')
+                foreach ($tag in $fallbackTags) {
+                    $short = ($tag -replace '^v','') -replace '\.windows\.1$',''
+                    foreach ($variant in @('', 'busybox-')) {
+                        Test-CancelRequested
+                        $candidateName = "MinGit-$short-${variant}64-bit.zip"
+                        $candidateUrl = "https://github.com/git-for-windows/git/releases/download/$tag/$candidateName"
+                        try {
+                            Write-Log ("Probing MinGit asset: {0}" -f $candidateName)
+                            $head = Invoke-WebRequest -Uri $candidateUrl -Method Head -UseBasicParsing -ErrorAction Stop
+                            if ($head.StatusCode -ge 200 -and $head.StatusCode -lt 300) {
+                                $downloadUrl = $candidateUrl
+                                Write-Log ("Using fallback MinGit URL: {0}" -f $downloadUrl)
+                                break
+                            }
+                        } catch { Write-Log ("Asset not found: {0}" -f $candidateName) }
+                    }
+                    if ($downloadUrl) { break }
+                }
+            }
+            if (-not $downloadUrl) {
+                Write-Log 'All MinGit fallback attempts failed; portable Git not installed.'
+                return @{ Git = (Test-CommandAvailable git); PathAdded = $false }
+            }
+        } else {
+            $downloadUrl = 'https://github.com' + $assetPath
+        }
     $timestamp = (Get-Date).ToString('HH:mm:ss')
     $line = "[$timestamp] $Message"
     $txtLog.AppendText($line + [Environment]::NewLine)
-    $txtLog.ScrollToCaret()
+        Test-CancelRequested
     [System.Windows.Forms.Application]::DoEvents()
 }
-
+        Test-CancelRequested
 function Test-DirectoryEmptyOrCreate { # renamed from Ensure-Directory-EmptyOrCreate (unapproved verb)
     param(
         [Parameter(Mandatory)][string]$Path,
