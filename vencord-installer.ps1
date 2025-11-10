@@ -470,6 +470,7 @@ function Invoke-PnpmSteps { # renamed from Run-PnpmSteps
                 $psi = New-Object System.Diagnostics.ProcessStartInfo
                 $psi.FileName = 'pnpm'
                 $psi.Arguments = 'install'
+                $psi.WorkingDirectory = $RepoRoot
                 $psi.RedirectStandardOutput = $true
                 $psi.RedirectStandardError = $true
                 $psi.UseShellExecute = $false
@@ -489,6 +490,7 @@ function Invoke-PnpmSteps { # renamed from Run-PnpmSteps
                 $psi = New-Object System.Diagnostics.ProcessStartInfo
                 $psi.FileName = 'pnpm'
                 $psi.Arguments = 'build'
+                $psi.WorkingDirectory = $RepoRoot
                 $psi.RedirectStandardOutput = $true
                 $psi.RedirectStandardError = $true
                 $psi.UseShellExecute = $false
@@ -521,18 +523,30 @@ function Start-InjectElevatedConsole {
         $tempScript = Join-Path ([IO.Path]::GetTempPath()) ("vencord-inject-" + (Get-Random) + ".ps1")
         $lines = @()
         $lines += "$ErrorActionPreference = 'Continue'"
+        $lines += "$host.ui.RawUI.WindowTitle = 'Vencord Inject (elevated)'"
         $lines += "Set-Location -LiteralPath '" + ($RepoRoot.Replace("'","''")) + "'"
         if ($nodeRoot) { $lines += "$env:Path = '" + ($nodeRoot.Replace("'","''")) + ";' + $env:Path" }
-        $lines += "if (Test-Path -LiteralPath '" + ($pnpmExe.Replace("'","''")) + "') { & '" + ($pnpmExe.Replace("'","''")) + "' inject }"
-        $lines += "elseif (Get-Command pnpm -ErrorAction SilentlyContinue) { pnpm inject }"
-        $lines += "elseif (Get-Command corepack -ErrorAction SilentlyContinue) { corepack pnpm inject }"
-        $lines += "else { Write-Host 'pnpm not found; cannot inject.' }"
+        $lines += "Write-Host ('Working directory: ' + (Get-Location))"
+        $lines += "Write-Host 'Attempting to locate pnpm...'"
+        # If portable pnpm exists, use it first
+        $lines += "if (Test-Path -LiteralPath '" + ($pnpmExe.Replace("'","''")) + "') { Write-Host 'Using portable pnpm.exe'; & '" + ($pnpmExe.Replace("'","''")) + "' inject; return }"
+        # Try direct pnpm
+        $lines += "if (Get-Command pnpm -ErrorAction SilentlyContinue) { Write-Host ('Using pnpm from PATH: ' + (Get-Command pnpm).Path); pnpm inject; return }"
+        # Try corepack to prepare/activate pnpm
+        $lines += "if (Get-Command corepack -ErrorAction SilentlyContinue) {"
+        $lines += "  Write-Host 'Corepack found. Enabling and preparing pnpm...'"
+        $lines += "  try { corepack enable } catch { Write-Host ('corepack enable error: ' + $_.Exception.Message) }"
+        $lines += "  try { corepack prepare pnpm@latest --activate } catch { Write-Host ('corepack prepare error: ' + $_.Exception.Message) }"
+        $lines += "  if (Get-Command pnpm -ErrorAction SilentlyContinue) { Write-Host ('Using pnpm from Corepack: ' + (Get-Command pnpm).Path); pnpm inject; return }"
+        $lines += "}"
+        $lines += "Write-Host 'pnpm not found; cannot inject.'"
         Set-Content -LiteralPath $tempScript -Value ($lines -join [Environment]::NewLine) -Encoding UTF8
 
         Write-Log "Opening elevated console for 'pnpm inject'..."
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = 'powershell.exe'
         $psi.Arguments = "-NoProfile -NoExit -ExecutionPolicy Bypass -File `"$tempScript`""
+        $psi.WorkingDirectory = $RepoRoot
         $psi.Verb = 'runas'
         $psi.UseShellExecute = $true
         $psi.WindowStyle = 'Normal'
