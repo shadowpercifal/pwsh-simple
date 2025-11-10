@@ -314,9 +314,9 @@ $lblToolsHeader = New-Object System.Windows.Forms.Label; $lblToolsHeader.Text = 
 function New-ToolRow {
     param([string]$Name,[int]$Y)
     $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = "${Name}:"; $lbl.Location = New-Object System.Drawing.Point(12,$Y); $lbl.AutoSize = $true
-    $txt = New-Object System.Windows.Forms.TextBox; $txt.Location = New-Object System.Drawing.Point(70,$Y-2); $txt.Size = New-Object System.Drawing.Size(360,24); $txt.Anchor = 'Top,Left,Right'
-    $btnCheck = New-Object System.Windows.Forms.Button; $btnCheck.Text = 'Check'; $btnCheck.Location = New-Object System.Drawing.Point(440,$Y-4); $btnCheck.Size = New-Object System.Drawing.Size(70,28)
-    $btnDownload = New-Object System.Windows.Forms.Button; $btnDownload.Text = 'Download'; $btnDownload.Location = New-Object System.Drawing.Point(520,$Y-4); $btnDownload.Size = New-Object System.Drawing.Size(90,28)
+    $txt = New-Object System.Windows.Forms.TextBox; $txt.Location = New-Object System.Drawing.Point -ArgumentList 70, ($Y - 2); $txt.Size = New-Object System.Drawing.Size(360,24); $txt.Anchor = 'Top,Left,Right'
+    $btnCheck = New-Object System.Windows.Forms.Button; $btnCheck.Text = 'Check'; $btnCheck.Location = New-Object System.Drawing.Point -ArgumentList 440, ($Y - 4); $btnCheck.Size = New-Object System.Drawing.Size(70,28)
+    $btnDownload = New-Object System.Windows.Forms.Button; $btnDownload.Text = 'Download'; $btnDownload.Location = New-Object System.Drawing.Point -ArgumentList 520, ($Y - 4); $btnDownload.Size = New-Object System.Drawing.Size(90,28)
     $status = New-Object System.Windows.Forms.Label; $status.Text = 'Status: Unknown'; $status.Location = New-Object System.Drawing.Point(620,$Y); $status.AutoSize = $true
     return [pscustomobject]@{ Label=$lbl; TextBox=$txt; CheckButton=$btnCheck; DownloadButton=$btnDownload; StatusLabel=$status }
 }
@@ -329,13 +329,13 @@ $form.Controls.AddRange(@($rowGit.Label,$rowGit.TextBox,$rowGit.CheckButton,$row
 
 # Vencord directory
 $lblDir = New-Object System.Windows.Forms.Label; $lblDir.Text = 'Vencord install directory'; $lblDir.Location = New-Object System.Drawing.Point(12,$y); $lblDir.AutoSize = $true
-$txtDir = New-Object System.Windows.Forms.TextBox; $txtDir.Location = New-Object System.Drawing.Point(12,$y+20); $txtDir.Size = New-Object System.Drawing.Size(640,24); $txtDir.Anchor = 'Top,Left,Right'
-$btnBrowse = New-Object System.Windows.Forms.Button; $btnBrowse.Text = 'Browse...'; $btnBrowse.Location = New-Object System.Drawing.Point(660,$y+18); $btnBrowse.Size = New-Object System.Drawing.Size(120,28); $btnBrowse.Anchor = 'Top,Right'
+$txtDir = New-Object System.Windows.Forms.TextBox; $txtDir.Location = New-Object System.Drawing.Point -ArgumentList 12, ($y + 20); $txtDir.Size = New-Object System.Drawing.Size(640,24); $txtDir.Anchor = 'Top,Left,Right'
+$btnBrowse = New-Object System.Windows.Forms.Button; $btnBrowse.Text = 'Browse...'; $btnBrowse.Location = New-Object System.Drawing.Point -ArgumentList 660, ($y + 18); $btnBrowse.Size = New-Object System.Drawing.Size(120,28); $btnBrowse.Anchor = 'Top,Right'
 $form.Controls.AddRange(@($lblDir,$txtDir,$btnBrowse)); $y += 60
 
 # Plugins
 $lblPlugins = New-Object System.Windows.Forms.Label; $lblPlugins.Text = 'Custom plugin URLs (one per line or separated by .git / https://)'; $lblPlugins.Location = New-Object System.Drawing.Point(12,$y); $lblPlugins.AutoSize = $true
-$txtPlugins = New-Object System.Windows.Forms.TextBox; $txtPlugins.Location = New-Object System.Drawing.Point(12,$y+20); $txtPlugins.Size = New-Object System.Drawing.Size(768,140); $txtPlugins.Multiline = $true; $txtPlugins.ScrollBars='Vertical'; $txtPlugins.Anchor='Top,Left,Right'
+$txtPlugins = New-Object System.Windows.Forms.TextBox; $txtPlugins.Location = New-Object System.Drawing.Point -ArgumentList 12, ($y + 20); $txtPlugins.Size = New-Object System.Drawing.Size(768,140); $txtPlugins.Multiline = $true; $txtPlugins.ScrollBars='Vertical'; $txtPlugins.Anchor='Top,Left,Right'
 $form.Controls.AddRange(@($lblPlugins,$txtPlugins)); $y += 170
 
 # pnpm step checkboxes (consecutive order enforcement)
@@ -434,5 +434,5 @@ $btnInstall.Add_Click({
 })
 
 $form.Add_Shown({ $form.Activate() })
-[void]($form.add_FormClosing({ param($sender,$eventArgs) if ($script:isInstalling -and -not $script:cancelRequested) { $script:cancelRequested = $true; try { if ($script:currentProcess -and -not $script:currentProcess.HasExited) { $script:currentProcess.Kill() } } catch {}; try { if ($script:targetDir -and (Test-Path $script:targetDir)) { Remove-Item -LiteralPath $script:targetDir -Recurse -Force -ErrorAction SilentlyContinue } } catch {}; foreach ($p in $script:tempPaths) { try { if ($p -and (Test-Path $p)) { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue } } catch {} } } }))
+[void]($form.add_FormClosing({ param($src,$ev) if ($script:isInstalling -and -not $script:cancelRequested) { $script:cancelRequested = $true; try { if ($script:currentProcess -and -not $script:currentProcess.HasExited) { $script:currentProcess.Kill() } } catch {}; try { if ($script:targetDir -and (Test-Path $script:targetDir)) { Remove-Item -LiteralPath $script:targetDir -Recurse -Force -ErrorAction SilentlyContinue } } catch {}; foreach ($p in $script:tempPaths) { try { if ($p -and (Test-Path $p)) { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue } } catch {} } } }))
 [void]$form.ShowDialog()
