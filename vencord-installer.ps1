@@ -103,7 +103,7 @@ function Invoke-ExternalTool {
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     $psi.FileName = $pwsh
-    $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command \"$cmdLine\""
+    $psi.Arguments = '-NoProfile -ExecutionPolicy Bypass -Command "$cmdLine"'
 
     $proc = [System.Diagnostics.Process]::Start($psi)
     $script:currentProcess = $proc
