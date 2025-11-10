@@ -123,7 +123,7 @@ function Resolve-Pnpm {
     return $resolved
 }
 
-function Parse-PluginUrls {
+function Get-PluginUrls {
     param([string]$Text)
     $results = @()
     if ([string]::IsNullOrWhiteSpace($Text)) { return $results }
@@ -309,15 +309,15 @@ $form.StartPosition = 'CenterScreen'
 $form.MaximizeBox = $true
 
 $y = 12
-$lblToolsHeader = New-Object System.Windows.Forms.Label; $lblToolsHeader.Text = 'Tool Status & Paths (All Mandatory)'; $lblToolsHeader.Location = New-Object System.Drawing.Point(12,$y); $lblToolsHeader.AutoSize = $true; $form.Controls.Add($lblToolsHeader); $y += 24
+$lblToolsHeader = New-Object System.Windows.Forms.Label; $lblToolsHeader.Text = 'Tool Status & Paths (All Mandatory)'; $lblToolsHeader.Location = New-Object System.Drawing.Point -ArgumentList 12, $y; $lblToolsHeader.AutoSize = $true; $form.Controls.Add($lblToolsHeader); $y += 24
 
 function New-ToolRow {
     param([string]$Name,[int]$Y)
-    $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = "${Name}:"; $lbl.Location = New-Object System.Drawing.Point(12,$Y); $lbl.AutoSize = $true
+    $lbl = New-Object System.Windows.Forms.Label; $lbl.Text = "${Name}:"; $lbl.Location = New-Object System.Drawing.Point -ArgumentList 12, $Y; $lbl.AutoSize = $true
     $txt = New-Object System.Windows.Forms.TextBox; $txt.Location = New-Object System.Drawing.Point -ArgumentList 70, ($Y - 2); $txt.Size = New-Object System.Drawing.Size(360,24); $txt.Anchor = 'Top,Left,Right'
     $btnCheck = New-Object System.Windows.Forms.Button; $btnCheck.Text = 'Check'; $btnCheck.Location = New-Object System.Drawing.Point -ArgumentList 440, ($Y - 4); $btnCheck.Size = New-Object System.Drawing.Size(70,28)
     $btnDownload = New-Object System.Windows.Forms.Button; $btnDownload.Text = 'Download'; $btnDownload.Location = New-Object System.Drawing.Point -ArgumentList 520, ($Y - 4); $btnDownload.Size = New-Object System.Drawing.Size(90,28)
-    $status = New-Object System.Windows.Forms.Label; $status.Text = 'Status: Unknown'; $status.Location = New-Object System.Drawing.Point(620,$Y); $status.AutoSize = $true
+    $status = New-Object System.Windows.Forms.Label; $status.Text = 'Status: Unknown'; $status.Location = New-Object System.Drawing.Point -ArgumentList 620, $Y; $status.AutoSize = $true
     return [pscustomobject]@{ Label=$lbl; TextBox=$txt; CheckButton=$btnCheck; DownloadButton=$btnDownload; StatusLabel=$status }
 }
 
@@ -328,25 +328,25 @@ $rowPnpm = New-ToolRow -Name 'pnpm' -Y $y; $y += 40
 $form.Controls.AddRange(@($rowGit.Label,$rowGit.TextBox,$rowGit.CheckButton,$rowGit.DownloadButton,$rowGit.StatusLabel,$rowNode.Label,$rowNode.TextBox,$rowNode.CheckButton,$rowNode.DownloadButton,$rowNode.StatusLabel,$rowPnpm.Label,$rowPnpm.TextBox,$rowPnpm.CheckButton,$rowPnpm.DownloadButton,$rowPnpm.StatusLabel))
 
 # Vencord directory
-$lblDir = New-Object System.Windows.Forms.Label; $lblDir.Text = 'Vencord install directory'; $lblDir.Location = New-Object System.Drawing.Point(12,$y); $lblDir.AutoSize = $true
+$lblDir = New-Object System.Windows.Forms.Label; $lblDir.Text = 'Vencord install directory'; $lblDir.Location = New-Object System.Drawing.Point -ArgumentList 12, $y; $lblDir.AutoSize = $true
 $txtDir = New-Object System.Windows.Forms.TextBox; $txtDir.Location = New-Object System.Drawing.Point -ArgumentList 12, ($y + 20); $txtDir.Size = New-Object System.Drawing.Size(640,24); $txtDir.Anchor = 'Top,Left,Right'
 $btnBrowse = New-Object System.Windows.Forms.Button; $btnBrowse.Text = 'Browse...'; $btnBrowse.Location = New-Object System.Drawing.Point -ArgumentList 660, ($y + 18); $btnBrowse.Size = New-Object System.Drawing.Size(120,28); $btnBrowse.Anchor = 'Top,Right'
 $form.Controls.AddRange(@($lblDir,$txtDir,$btnBrowse)); $y += 60
 
 # Plugins
-$lblPlugins = New-Object System.Windows.Forms.Label; $lblPlugins.Text = 'Custom plugin URLs (one per line or separated by .git / https://)'; $lblPlugins.Location = New-Object System.Drawing.Point(12,$y); $lblPlugins.AutoSize = $true
+$lblPlugins = New-Object System.Windows.Forms.Label; $lblPlugins.Text = 'Custom plugin URLs (one per line or separated by .git / https://)'; $lblPlugins.Location = New-Object System.Drawing.Point -ArgumentList 12, $y; $lblPlugins.AutoSize = $true
 $txtPlugins = New-Object System.Windows.Forms.TextBox; $txtPlugins.Location = New-Object System.Drawing.Point -ArgumentList 12, ($y + 20); $txtPlugins.Size = New-Object System.Drawing.Size(768,140); $txtPlugins.Multiline = $true; $txtPlugins.ScrollBars='Vertical'; $txtPlugins.Anchor='Top,Left,Right'
 $form.Controls.AddRange(@($lblPlugins,$txtPlugins)); $y += 170
 
 # pnpm step checkboxes (consecutive order enforcement)
-$chkPnpmInstall = New-Object System.Windows.Forms.CheckBox; $chkPnpmInstall.Text = 'pnpm install'; $chkPnpmInstall.Location = New-Object System.Drawing.Point(12,$y); $chkPnpmInstall.AutoSize = $true; $chkPnpmInstall.Checked = $true
-$chkPnpmBuild = New-Object System.Windows.Forms.CheckBox; $chkPnpmBuild.Text = 'pnpm build'; $chkPnpmBuild.Location = New-Object System.Drawing.Point(120,$y); $chkPnpmBuild.AutoSize = $true; $chkPnpmBuild.Checked = $true
-$chkPnpmInject = New-Object System.Windows.Forms.CheckBox; $chkPnpmInject.Text = 'pnpm inject (elevated)'; $chkPnpmInject.Location = New-Object System.Drawing.Point(220,$y); $chkPnpmInject.AutoSize = $true; $chkPnpmInject.Checked = $true
+$chkPnpmInstall = New-Object System.Windows.Forms.CheckBox; $chkPnpmInstall.Text = 'pnpm install'; $chkPnpmInstall.Location = New-Object System.Drawing.Point -ArgumentList 12, $y; $chkPnpmInstall.AutoSize = $true; $chkPnpmInstall.Checked = $true
+$chkPnpmBuild = New-Object System.Windows.Forms.CheckBox; $chkPnpmBuild.Text = 'pnpm build'; $chkPnpmBuild.Location = New-Object System.Drawing.Point -ArgumentList 120, $y; $chkPnpmBuild.AutoSize = $true; $chkPnpmBuild.Checked = $true
+$chkPnpmInject = New-Object System.Windows.Forms.CheckBox; $chkPnpmInject.Text = 'pnpm inject (elevated)'; $chkPnpmInject.Location = New-Object System.Drawing.Point -ArgumentList 220, $y; $chkPnpmInject.AutoSize = $true; $chkPnpmInject.Checked = $true
 $form.Controls.AddRange(@($chkPnpmInstall,$chkPnpmBuild,$chkPnpmInject)); $y += 40
 
 # Action buttons
-$btnInstall = New-Object System.Windows.Forms.Button; $btnInstall.Text = 'Install'; $btnInstall.Location = New-Object System.Drawing.Point(12,$y); $btnInstall.Size = New-Object System.Drawing.Size(110,34)
-$btnCancel = New-Object System.Windows.Forms.Button; $btnCancel.Text = 'Cancel'; $btnCancel.Location = New-Object System.Drawing.Point(132,$y); $btnCancel.Size = New-Object System.Drawing.Size(110,34); $btnCancel.Enabled = $false
+$btnInstall = New-Object System.Windows.Forms.Button; $btnInstall.Text = 'Install'; $btnInstall.Location = New-Object System.Drawing.Point -ArgumentList 12, $y; $btnInstall.Size = New-Object System.Drawing.Size(110,34)
+$btnCancel = New-Object System.Windows.Forms.Button; $btnCancel.Text = 'Cancel'; $btnCancel.Location = New-Object System.Drawing.Point -ArgumentList 132, $y; $btnCancel.Size = New-Object System.Drawing.Size(110,34); $btnCancel.Enabled = $false
 $form.Controls.AddRange(@($btnInstall,$btnCancel)); $y += 50
 
 # Log output
@@ -412,7 +412,7 @@ $btnInstall.Add_Click({
         if (-not (Get-VencordRepo -DestinationDir $installDir)) { throw 'Failed to clone Vencord.' }
         Test-CancelRequested
         # Plugins
-        $urls = Parse-PluginUrls -Text $txtPlugins.Text
+    $urls = Get-PluginUrls -Text $txtPlugins.Text
         if ($urls.Count -gt 0) { Write-Log "Detected $($urls.Count) plugin link(s)."; Get-PluginRepositories -RepoRoot $installDir -PluginUrls $urls } else { Write-Log 'No plugins to process.' }
         Test-CancelRequested
         Invoke-PnpmSteps -RepoRoot $installDir -Install:$chkPnpmInstall.Checked -Build:$chkPnpmBuild.Checked -Inject:$chkPnpmInject.Checked
