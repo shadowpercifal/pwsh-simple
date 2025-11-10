@@ -19,7 +19,7 @@ $script:currentProcess = $null
 $script:targetDir = $null
 $script:tempPaths = New-Object System.Collections.ArrayList
 
-function Check-Cancel {
+function Test-CancelRequested {
     if ($script:cancelRequested) { throw 'CANCELLED' }
 }
 
@@ -127,10 +127,10 @@ function Get-VencordRepoZip { # renamed from Download-RepoZip
     try {
     [void]$script:tempPaths.Add($tempZip)
     [void]$script:tempPaths.Add($tempExtract)
-    Check-Cancel
+    Test-CancelRequested
     Write-Log "Downloading Vencord (zip)..."
         Invoke-WebRequest -Uri $zipUrl -OutFile $tempZip -UseBasicParsing
-    Check-Cancel
+    Test-CancelRequested
         Write-Log "Extracting archive..."
         Expand-Archive -Path $tempZip -DestinationPath $tempExtract -Force
         $root = Get-ChildItem -Path $tempExtract | Where-Object { $_.PSIsContainer } | Select-Object -First 1
@@ -175,7 +175,7 @@ function Get-VencordRepoGit { # renamed from Clone-Repo
     $psi.CreateNoWindow = $true
     $proc = [System.Diagnostics.Process]::Start($psi)
     $script:currentProcess = $proc
-    while (-not $proc.HasExited) { Check-Cancel; Start-Sleep -Milliseconds 200 }
+    while (-not $proc.HasExited) { Test-CancelRequested; Start-Sleep -Milliseconds 200 }
     $stdout = $proc.StandardOutput.ReadToEnd()
     $stderr = $proc.StandardError.ReadToEnd()
     $script:currentProcess = $null
@@ -240,7 +240,7 @@ function Get-PluginRepositories { # renamed from Download-Plugins
                 $psi.CreateNoWindow = $true
                 $p = [System.Diagnostics.Process]::Start($psi)
                 $script:currentProcess = $p
-                while (-not $p.HasExited) { Check-Cancel; Start-Sleep -Milliseconds 200 }
+                while (-not $p.HasExited) { Test-CancelRequested; Start-Sleep -Milliseconds 200 }
                 $stdout = $p.StandardOutput.ReadToEnd()
                 $stderr = $p.StandardError.ReadToEnd()
                 $script:currentProcess = $null
@@ -265,13 +265,13 @@ function Get-PluginRepositories { # renamed from Download-Plugins
                 foreach ($br in $branches) {
                     $zipUrl = "https://codeload.github.com/$($info.Owner)/$($info.Repo)/zip/refs/heads/$br"
                     try {
-                        Check-Cancel
+                        Test-CancelRequested
                         Write-Log "Downloading plugin repo zip: $zipUrl"
                         Invoke-WebRequest -Uri $zipUrl -OutFile $zipFile -UseBasicParsing -ErrorAction Stop
                         $downloaded = $true; break
                     } catch { Write-Log "Zip for branch '$br' unavailable: $($_.Exception.Message)" }
                 }
-                Check-Cancel
+                Test-CancelRequested
                 if (-not $downloaded) { throw "Could not download repo zip for any branch (tried: $($branches -join ', '))" }
                 Write-Log 'Extracting plugin repo archive...'
                 Expand-Archive -Path $zipFile -DestinationPath $exDir -Force
@@ -367,7 +367,7 @@ function Get-UrlsFromText { # renamed from Extract-UrlsFromText
     return $results
 }
 
-function Ensure-PortableNodeAndPnpm {
+function Get-PortableNodeAndPnpm {
     param(
         [Parameter(Mandatory)][string]$BaseDir
     )
@@ -456,6 +456,69 @@ function Ensure-PortableNodeAndPnpm {
     return @{ Node = (Test-CommandAvailable node); Pnpm = (Test-CommandAvailable pnpm); Corepack = (Test-CommandAvailable corepack) }
 }
 
+function Get-PortableGit {
+    param(
+        [Parameter(Mandatory)][string]$BaseDir
+    )
+    $toolsDir = Join-Path $BaseDir '.tools'
+    if (-not (Test-Path -LiteralPath $toolsDir)) { New-Item -ItemType Directory -Path $toolsDir -Force | Out-Null }
+
+    $gitOk = Test-CommandAvailable git
+    # Always prefer installing a portable Git when bootstrap is requested to avoid inherited errors
+    try {
+        Write-Log 'Ensuring portable Git (MinGit) is available...'
+        $latestUrl = 'https://github.com/git-for-windows/git/releases/latest'
+        $html = $null
+        try { $html = (Invoke-WebRequest -Uri $latestUrl -UseBasicParsing).Content } catch { Write-Log "WARNING: Could not query Git for Windows latest page: $($_.Exception.Message)" }
+        $assetPath = $null
+        if ($html) {
+            $m = [regex]::Match($html, 'href=\"(?<u>/git-for-windows/git/releases/download/[^\"]+/MinGit-[^\"]*-64-bit\.zip)\"', 'IgnoreCase')
+            if ($m.Success) { $assetPath = $m.Groups['u'].Value }
+            if (-not $assetPath) {
+                $m2 = [regex]::Match($html, 'href=\"(?<u>/git-for-windows/git/releases/download/[^\"]+/MinGit-[^\"]*busybox-64-bit\.zip)\"', 'IgnoreCase')
+                if ($m2.Success) { $assetPath = $m2.Groups['u'].Value }
+            }
+        }
+        if (-not $assetPath) {
+            Write-Log 'WARNING: Could not determine latest MinGit zip from releases page.'
+            return @{ Git = (Test-CommandAvailable git); PathAdded = $false }
+        }
+        $downloadUrl = 'https://github.com' + $assetPath
+        $zipName = Split-Path -Leaf $downloadUrl
+        $tmpZip = Join-Path ([IO.Path]::GetTempPath()) $zipName
+        [void]$script:tempPaths.Add($tmpZip)
+        Check-Cancel
+        Write-Log ("Downloading MinGit: {0}" -f $zipName)
+        Invoke-WebRequest -Uri $downloadUrl -OutFile $tmpZip -UseBasicParsing
+        Check-Cancel
+        $gitDir = Join-Path $toolsDir 'git'
+        if (Test-Path $gitDir) { try { Remove-Item -LiteralPath $gitDir -Recurse -Force -ErrorAction SilentlyContinue } catch {} }
+        New-Item -ItemType Directory -Path $gitDir -Force | Out-Null
+        Write-Log 'Extracting MinGit ...'
+        Expand-Archive -Path $tmpZip -DestinationPath $gitDir -Force
+        # Extracted folder usually contains a single root directory
+        $root = Get-ChildItem -Path $gitDir -Directory | Select-Object -First 1
+        $gitRoot = if ($root) { $root.FullName } else { $gitDir }
+        # Prepend essential Git paths to PATH so our session uses portable Git
+        $cmdPath = Join-Path $gitRoot 'cmd'
+        $mingwPath = Join-Path $gitRoot 'mingw64\bin'
+        $usrBin = Join-Path $gitRoot 'usr\bin'
+        $pathsToAdd = @()
+        if (Test-Path -LiteralPath $cmdPath) { $pathsToAdd += $cmdPath }
+        if (Test-Path -LiteralPath $mingwPath) { $pathsToAdd += $mingwPath }
+        if (Test-Path -LiteralPath $usrBin) { $pathsToAdd += $usrBin }
+        if ($pathsToAdd.Count -gt 0) {
+            $env:PATH = ([string]::Join(';', $pathsToAdd)) + ';' + $env:PATH
+            Write-Log ("Added portable Git to PATH (session): {0}" -f ([string]::Join('; ', $pathsToAdd)))
+        }
+        $gitOk = Test-CommandAvailable git
+        if ($gitOk) { Write-Log ("Git version: {0}" -f ((git --version 2>$null))) }
+    } catch {
+        Write-Log ("ERROR: Failed to setup portable Git: {0}" -f $_.Exception.Message)
+    }
+    return @{ Git = (Test-CommandAvailable git); PathAdded = $true }
+}
+
 function Invoke-PnpmSteps { # renamed from Run-PnpmSteps
     param(
         [Parameter(Mandatory)][string]$RepoRoot,
@@ -477,10 +540,10 @@ function Invoke-PnpmSteps { # renamed from Run-PnpmSteps
                 $psi.CreateNoWindow = $true
                 $p = [System.Diagnostics.Process]::Start($psi)
                 $script:currentProcess = $p
-                while (-not $p.HasExited) { Check-Cancel; Start-Sleep -Milliseconds 250 }
+                while (-not $p.HasExited) { Test-CancelRequested; Start-Sleep -Milliseconds 250 }
                 $out = $p.StandardOutput.ReadToEnd(); $err = $p.StandardError.ReadToEnd(); $script:currentProcess = $null
-                if ($out) { $out -split "`r?`n" | % { if ($_ -ne '') { Write-Log $_ } } }
-                if ($err) { $err -split "`r?`n" | % { if ($_ -ne '') { Write-Log $_ } } }
+                if ($out) { $out -split "`r?`n" | ForEach-Object { if ($_ -ne '') { Write-Log $_ } } }
+                if ($err) { $err -split "`r?`n" | ForEach-Object { if ($_ -ne '') { Write-Log $_ } } }
                 if ($p.ExitCode -ne 0) { throw "pnpm install failed ($($p.ExitCode))" }
             } catch { if ($_.Exception.Message -ne 'CANCELLED') { Write-Log "ERROR: $($_.Exception.Message)" } else { throw } }
         }
@@ -497,10 +560,10 @@ function Invoke-PnpmSteps { # renamed from Run-PnpmSteps
                 $psi.CreateNoWindow = $true
                 $p = [System.Diagnostics.Process]::Start($psi)
                 $script:currentProcess = $p
-                while (-not $p.HasExited) { Check-Cancel; Start-Sleep -Milliseconds 250 }
+                while (-not $p.HasExited) { Test-CancelRequested; Start-Sleep -Milliseconds 250 }
                 $out = $p.StandardOutput.ReadToEnd(); $err = $p.StandardError.ReadToEnd(); $script:currentProcess = $null
-                if ($out) { $out -split "`r?`n" | % { if ($_ -ne '') { Write-Log $_ } } }
-                if ($err) { $err -split "`r?`n" | % { if ($_ -ne '') { Write-Log $_ } } }
+                if ($out) { $out -split "`r?`n" | ForEach-Object { if ($_ -ne '') { Write-Log $_ } } }
+                if ($err) { $err -split "`r?`n" | ForEach-Object { if ($_ -ne '') { Write-Log $_ } } }
                 if ($p.ExitCode -ne 0) { throw "pnpm build failed ($($p.ExitCode))" }
             } catch { if ($_.Exception.Message -ne 'CANCELLED') { Write-Log "ERROR: $($_.Exception.Message)" } else { throw } }
         }
@@ -805,8 +868,11 @@ $btnInstall.Add_Click({
         # Tools bootstrap (portable Node + pnpm) if requested
         if ($chkBootstrap.Checked) {
             Write-Log 'Checking for Node.js/pnpm and installing portable versions if needed...'
-            $toolsStatus = Ensure-PortableNodeAndPnpm -BaseDir $installDir
+            $gitPortable = Get-PortableGit -BaseDir $installDir
+            $toolsStatus = Get-PortableNodeAndPnpm -BaseDir $installDir
             Write-Log ("Tools status: Node={0} pnpm={1} corepack={2}" -f $toolsStatus.Node, $toolsStatus.Pnpm, $toolsStatus.Corepack)
+            if ($gitPortable.Git) { Write-Log 'Portable Git ready.' } else { Write-Log 'Portable Git not available.' }
+            $hasGit = Test-CommandAvailable git
             Update-ToolStatus -Git:$hasGit -Node:(Test-CommandAvailable node) -Pnpm:(Test-CommandAvailable pnpm)
         }
 
@@ -865,7 +931,7 @@ $btnInstall.Add_Click({
 
 $form.Add_Shown({ $form.Activate() })
 [void]($form.add_FormClosing({
-    param($sender,$e)
+    param($src,$args)
     if ($script:isInstalling -and -not $script:cancelRequested) {
         $script:cancelRequested = $true
         try { if ($script:currentProcess -and -not $script:currentProcess.HasExited) { $script:currentProcess.Kill() } } catch {}
