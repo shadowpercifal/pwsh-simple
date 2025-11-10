@@ -381,25 +381,35 @@ function Start-InjectElevatedConsole {
     try {
         Update-EnvironmentVars
         $tempScript = Join-Path ([IO.Path]::GetTempPath()) ("vencord-inject-" + (Get-Random) + ".ps1")
-        # Preserve current PATH for the elevated process to ensure portable tool resolution
         $parentPath = $env:PATH
-        $lines = @()
-        $lines += "$ErrorActionPreference = 'Stop'"
-        $lines += '$host.ui.RawUI.WindowTitle = "Vencord Inject (elevated)"'
-        $lines += ('Set-Location -LiteralPath "' + ($RepoRoot.Replace('"','\"')) + '"')
-        $lines += ('$env:Path = "' + ($parentPath.Replace('"','\"')) + '"')
-        $lines += 'Write-Host "Working directory: $(Get-Location)"'
-        $lines += 'if (Get-Command pnpm -ErrorAction SilentlyContinue) { Write-Host "Using pnpm: $(Get-Command pnpm).Path"; pnpm inject; Write-Host "Inject finished." } else { Write-Host "pnpm not found; cannot inject." }'
-        $lines += 'Write-Host "Press Enter to close."'
-        $lines += 'Read-Host'
-        Set-Content -LiteralPath $tempScript -Value ($lines -join [Environment]::NewLine) -Encoding UTF8
-        Write-Log "Opening elevated console for 'pnpm inject'..."
+        $repoEsc = $RepoRoot.Replace('"','`"')
+        $pathEsc = $parentPath.Replace('"','`"')
+        $template = @'
+$ErrorActionPreference = 'Stop'
+$host.ui.RawUI.WindowTitle = "Vencord Inject (elevated)"
+Set-Location -LiteralPath "__REPO__"
+$env:Path = "__PATH__"
+Write-Host "Working directory: $(Get-Location)"
+if (Get-Command pnpm -ErrorAction SilentlyContinue) {
+  Write-Host ("Using pnpm: " + (Get-Command pnpm).Path)
+  pnpm inject
+  Write-Host "Inject finished."
+} else {
+  Write-Host "pnpm not found; cannot inject."
+}
+Write-Host "Press Enter to close."
+[void](Read-Host)
+'@
+    $scriptContent = $template.Replace('__REPO__', $repoEsc).Replace('__PATH__', $pathEsc)
+    Set-Content -LiteralPath $tempScript -Value $scriptContent -Encoding UTF8
+    [void]$script:tempPaths.Add($tempScript)
+        Write-Log "Opening elevated console for 'pnpm inject' (interactive)..."
         $psi = New-Object System.Diagnostics.ProcessStartInfo
         $psi.FileName = 'powershell.exe'
         $psi.Arguments = "-NoProfile -NoExit -ExecutionPolicy Bypass -File `"$tempScript`""
-        $psi.WorkingDirectory = $RepoRoot; $psi.Verb = 'runas'; $psi.UseShellExecute = $true; $psi.WindowStyle = 'Normal'
+        $psi.WorkingDirectory = $RepoRoot; $psi.Verb='runas'; $psi.UseShellExecute=$true; $psi.WindowStyle='Normal'
         [void][System.Diagnostics.Process]::Start($psi)
-        Write-Log 'Elevated console started.'
+        Write-Log 'Elevated console started. Complete the inject in the new window.'
     } catch { Write-Log "ERROR launching elevated inject console: $($_.Exception.Message)" }
 }
 
@@ -521,7 +531,7 @@ $btnInstall.Add_Click({
         Invoke-PnpmSteps -RepoRoot $installDir -Install:$chkPnpmInstall.Checked -Build:$chkPnpmBuild.Checked -Inject:$chkPnpmInject.Checked
         Test-CancelRequested
         Write-Log 'Installation flow complete.'
-        [System.Windows.Forms.MessageBox]::Show("Vencord setup complete.\n\nRepo: $installDir\nPlugins: src/userplugins","Complete")
+        [System.Windows.Forms.MessageBox]::Show("Vencord setup complete.\r\n\r\nRepo: $installDir\r\nPlugins: src/userplugins","Complete")
     } catch {
         $msg = $_.Exception.Message
         if ($msg -eq 'CANCELLED') {
