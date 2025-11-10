@@ -12,6 +12,17 @@ try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
+# --- Global state for cancellation and tracking ---
+$script:isInstalling = $false
+$script:cancelRequested = $false
+$script:currentProcess = $null
+$script:targetDir = $null
+$script:tempPaths = New-Object System.Collections.ArrayList
+
+function Check-Cancel {
+    if ($script:cancelRequested) { throw 'CANCELLED' }
+}
+
 function Test-CommandAvailable {
     param([Parameter(Mandatory)][string]$Name)
     return [bool](Get-Command -Name $Name -ErrorAction SilentlyContinue)
@@ -52,7 +63,7 @@ function Write-Log {
     [System.Windows.Forms.Application]::DoEvents()
 }
 
-function Ensure-Directory-EmptyOrCreate {
+function Test-DirectoryEmptyOrCreate { # renamed from Ensure-Directory-EmptyOrCreate (unapproved verb)
     param(
         [Parameter(Mandatory)][string]$Path,
         [switch]$RequireEmpty
@@ -106,7 +117,7 @@ function Get-GitHubRepoInfo {
     return [pscustomobject]@{ Owner = $owner; Repo = $repo; Branch = $branch }
 }
 
-function Download-RepoZip {
+function Get-VencordRepoZip { # renamed from Download-RepoZip
     param(
         [Parameter(Mandatory)][string]$DestinationDir
     )
@@ -114,8 +125,12 @@ function Download-RepoZip {
     $tempZip = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "Vencord-$(Get-Random).zip")
     $tempExtract = [System.IO.Path]::Combine([System.IO.Path]::GetTempPath(), "Vencord-Extract-$(Get-Random)")
     try {
-        Write-Log "Downloading Vencord (zip)..."
+    [void]$script:tempPaths.Add($tempZip)
+    [void]$script:tempPaths.Add($tempExtract)
+    Check-Cancel
+    Write-Log "Downloading Vencord (zip)..."
         Invoke-WebRequest -Uri $zipUrl -OutFile $tempZip -UseBasicParsing
+    Check-Cancel
         Write-Log "Extracting archive..."
         Expand-Archive -Path $tempZip -DestinationPath $tempExtract -Force
         $root = Get-ChildItem -Path $tempExtract | Where-Object { $_.PSIsContainer } | Select-Object -First 1
@@ -145,7 +160,7 @@ function Download-RepoZip {
     }
 }
 
-function Clone-Repo {
+function Get-VencordRepoGit { # renamed from Clone-Repo
     param(
         [Parameter(Mandatory)][string]$DestinationDir
     )
@@ -159,9 +174,11 @@ function Clone-Repo {
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
     $proc = [System.Diagnostics.Process]::Start($psi)
+    $script:currentProcess = $proc
+    while (-not $proc.HasExited) { Check-Cancel; Start-Sleep -Milliseconds 200 }
     $stdout = $proc.StandardOutput.ReadToEnd()
     $stderr = $proc.StandardError.ReadToEnd()
-    $proc.WaitForExit()
+    $script:currentProcess = $null
     if ($stdout) { $stdout -split "`r?`n" | ForEach-Object { if ($_ -ne '') { Write-Log $_ } } }
     if ($stderr) { $stderr -split "`r?`n" | ForEach-Object { if ($_ -ne '') { Write-Log $_ } } }
     if ($proc.ExitCode -ne 0) {
@@ -172,7 +189,7 @@ function Clone-Repo {
     return $true
 }
 
-function Download-Plugins {
+function Get-PluginRepositories { # renamed from Download-Plugins
     param(
         [Parameter(Mandatory)][string]$RepoRoot,
         [Parameter(Mandatory)][string[]]$PluginUrls
@@ -202,6 +219,7 @@ function Download-Plugins {
             $repoName = $null
             $tempBase = Join-Path ([IO.Path]::GetTempPath()) ("vencord-plugin-" + (Get-Random))
             New-Item -ItemType Directory -Path $tempBase -Force | Out-Null
+            [void]$script:tempPaths.Add($tempBase)
             $repoRoot = $null
             $useGitHere = $false
             if ($info) { $repoName = $info.Repo }
@@ -221,9 +239,11 @@ function Download-Plugins {
                 $psi.UseShellExecute = $false
                 $psi.CreateNoWindow = $true
                 $p = [System.Diagnostics.Process]::Start($psi)
+                $script:currentProcess = $p
+                while (-not $p.HasExited) { Check-Cancel; Start-Sleep -Milliseconds 200 }
                 $stdout = $p.StandardOutput.ReadToEnd()
                 $stderr = $p.StandardError.ReadToEnd()
-                $p.WaitForExit()
+                $script:currentProcess = $null
                 if ($stdout) { $stdout -split "`r?`n" | ForEach-Object { if ($_ -ne '') { Write-Log $_ } } }
                 if ($stderr) { $stderr -split "`r?`n" | ForEach-Object { if ($_ -ne '') { Write-Log $_ } } }
                 if ($p.ExitCode -ne 0) { throw "git clone failed ($($p.ExitCode))" }
@@ -239,15 +259,19 @@ function Download-Plugins {
                 $zipFile = Join-Path ([IO.Path]::GetTempPath()) ("$($info.Owner)-$($info.Repo)-$(Get-Random).zip")
                 $exDir = Join-Path ([IO.Path]::GetTempPath()) ("extract-" + (Get-Random))
                 New-Item -ItemType Directory -Path $exDir -Force | Out-Null
+                [void]$script:tempPaths.Add($zipFile)
+                [void]$script:tempPaths.Add($exDir)
                 $downloaded = $false
                 foreach ($br in $branches) {
                     $zipUrl = "https://codeload.github.com/$($info.Owner)/$($info.Repo)/zip/refs/heads/$br"
                     try {
+                        Check-Cancel
                         Write-Log "Downloading plugin repo zip: $zipUrl"
                         Invoke-WebRequest -Uri $zipUrl -OutFile $zipFile -UseBasicParsing -ErrorAction Stop
                         $downloaded = $true; break
                     } catch { Write-Log "Zip for branch '$br' unavailable: $($_.Exception.Message)" }
                 }
+                Check-Cancel
                 if (-not $downloaded) { throw "Could not download repo zip for any branch (tried: $($branches -join ', '))" }
                 Write-Log 'Extracting plugin repo archive...'
                 Expand-Archive -Path $zipFile -DestinationPath $exDir -Force
@@ -320,7 +344,7 @@ function Download-Plugins {
     }
 }
 
-function Extract-UrlsFromText {
+function Get-UrlsFromText { # renamed from Extract-UrlsFromText
     param([string]$Text)
     $results = @()
     if ([string]::IsNullOrWhiteSpace($Text)) { return $results }
@@ -432,7 +456,7 @@ function Ensure-PortableNodeAndPnpm {
     return @{ Node = (Test-CommandAvailable node); Pnpm = (Test-CommandAvailable pnpm); Corepack = (Test-CommandAvailable corepack) }
 }
 
-function Run-PnpmSteps {
+function Invoke-PnpmSteps { # renamed from Run-PnpmSteps
     param(
         [Parameter(Mandatory)][string]$RepoRoot,
         [switch]$Install,
@@ -442,16 +466,82 @@ function Run-PnpmSteps {
     try {
         if ($Install) {
             Write-Log 'Running: pnpm install'
-            try { & pnpm install 2>&1 | ForEach-Object { if ($_ -ne '') { Write-Log $_ } } } catch { Write-Log "ERROR: $($_.Exception.Message)" }
+            try {
+                $psi = New-Object System.Diagnostics.ProcessStartInfo
+                $psi.FileName = 'pnpm'
+                $psi.Arguments = 'install'
+                $psi.RedirectStandardOutput = $true
+                $psi.RedirectStandardError = $true
+                $psi.UseShellExecute = $false
+                $psi.CreateNoWindow = $true
+                $p = [System.Diagnostics.Process]::Start($psi)
+                $script:currentProcess = $p
+                while (-not $p.HasExited) { Check-Cancel; Start-Sleep -Milliseconds 250 }
+                $out = $p.StandardOutput.ReadToEnd(); $err = $p.StandardError.ReadToEnd(); $script:currentProcess = $null
+                if ($out) { $out -split "`r?`n" | % { if ($_ -ne '') { Write-Log $_ } } }
+                if ($err) { $err -split "`r?`n" | % { if ($_ -ne '') { Write-Log $_ } } }
+                if ($p.ExitCode -ne 0) { throw "pnpm install failed ($($p.ExitCode))" }
+            } catch { if ($_.Exception.Message -ne 'CANCELLED') { Write-Log "ERROR: $($_.Exception.Message)" } else { throw } }
         }
         if ($Build) {
             Write-Log 'Running: pnpm build'
-            try { & pnpm build 2>&1 | ForEach-Object { if ($_ -ne '') { Write-Log $_ } } } catch { Write-Log "ERROR: $($_.Exception.Message)" }
-            Write-Log 'Running: pnpm inject'
-            try { & pnpm inject 2>&1 | ForEach-Object { if ($_ -ne '') { Write-Log $_ } } } catch { Write-Log "ERROR: $($_.Exception.Message)" }
+            try {
+                $psi = New-Object System.Diagnostics.ProcessStartInfo
+                $psi.FileName = 'pnpm'
+                $psi.Arguments = 'build'
+                $psi.RedirectStandardOutput = $true
+                $psi.RedirectStandardError = $true
+                $psi.UseShellExecute = $false
+                $psi.CreateNoWindow = $true
+                $p = [System.Diagnostics.Process]::Start($psi)
+                $script:currentProcess = $p
+                while (-not $p.HasExited) { Check-Cancel; Start-Sleep -Milliseconds 250 }
+                $out = $p.StandardOutput.ReadToEnd(); $err = $p.StandardError.ReadToEnd(); $script:currentProcess = $null
+                if ($out) { $out -split "`r?`n" | % { if ($_ -ne '') { Write-Log $_ } } }
+                if ($err) { $err -split "`r?`n" | % { if ($_ -ne '') { Write-Log $_ } } }
+                if ($p.ExitCode -ne 0) { throw "pnpm build failed ($($p.ExitCode))" }
+            } catch { if ($_.Exception.Message -ne 'CANCELLED') { Write-Log "ERROR: $($_.Exception.Message)" } else { throw } }
         }
     }
     finally { Pop-Location }
+}
+
+function Start-InjectElevatedConsole {
+    param([Parameter(Mandatory)][string]$RepoRoot)
+    try {
+        $toolsDir = Join-Path $RepoRoot '.tools'
+        $pnpmExe = Join-Path $toolsDir 'pnpm/pnpm.exe'
+        $nodeRoot = $null
+        $nodeTools = Join-Path $toolsDir 'node'
+        if (Test-Path -LiteralPath $nodeTools) {
+            $inner = Get-ChildItem -Path $nodeTools -Directory | Select-Object -First 1
+            if ($inner) { $nodeRoot = $inner.FullName }
+        }
+
+        $tempScript = Join-Path ([IO.Path]::GetTempPath()) ("vencord-inject-" + (Get-Random) + ".ps1")
+        $lines = @()
+        $lines += "$ErrorActionPreference = 'Continue'"
+        $lines += "Set-Location -LiteralPath '" + ($RepoRoot.Replace("'","''")) + "'"
+        if ($nodeRoot) { $lines += "$env:Path = '" + ($nodeRoot.Replace("'","''")) + ";' + $env:Path" }
+        $lines += "if (Test-Path -LiteralPath '" + ($pnpmExe.Replace("'","''")) + "') { & '" + ($pnpmExe.Replace("'","''")) + "' inject }"
+        $lines += "elseif (Get-Command pnpm -ErrorAction SilentlyContinue) { pnpm inject }"
+        $lines += "elseif (Get-Command corepack -ErrorAction SilentlyContinue) { corepack pnpm inject }"
+        $lines += "else { Write-Host 'pnpm not found; cannot inject.' }"
+        Set-Content -LiteralPath $tempScript -Value ($lines -join [Environment]::NewLine) -Encoding UTF8
+
+        Write-Log "Opening elevated console for 'pnpm inject'..."
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = 'powershell.exe'
+        $psi.Arguments = "-NoProfile -NoExit -ExecutionPolicy Bypass -File `"$tempScript`""
+        $psi.Verb = 'runas'
+        $psi.UseShellExecute = $true
+        $psi.WindowStyle = 'Normal'
+        [void][System.Diagnostics.Process]::Start($psi)
+        Write-Log 'Elevated console started. Follow prompts in the new window to complete injection.'
+    }
+    catch {
+        Write-Log "ERROR launching elevated inject console: $($_.Exception.Message)"
+    }
 }
 
 # --- UI ---
@@ -479,11 +569,11 @@ $btnBrowse.Anchor = 'Top,Right'
 
 $lblPlugins = New-Object System.Windows.Forms.Label
 $lblPlugins.Text = 'Custom plugin URLs (one per line)'
-$lblPlugins.Location = New-Object System.Drawing.Point(12, 75)
+$lblPlugins.Location = New-Object System.Drawing.Point(12, 95)
 $lblPlugins.AutoSize = $true
 
 $txtPlugins = New-Object System.Windows.Forms.TextBox
-$txtPlugins.Location = New-Object System.Drawing.Point(12, 95)
+$txtPlugins.Location = New-Object System.Drawing.Point(12, 115)
 $txtPlugins.Size = New-Object System.Drawing.Size(738, 130)
 $txtPlugins.Multiline = $true
 $txtPlugins.ScrollBars = 'Vertical'
@@ -514,9 +604,15 @@ $btnInstall.Text = 'Install'
 $btnInstall.Location = New-Object System.Drawing.Point(12, 340)
 $btnInstall.Size = New-Object System.Drawing.Size(110, 32)
 
+$btnCancel = New-Object System.Windows.Forms.Button
+$btnCancel.Text = 'Cancel'
+$btnCancel.Location = New-Object System.Drawing.Point(132, 340)
+$btnCancel.Size = New-Object System.Drawing.Size(110, 32)
+$btnCancel.Enabled = $false
+
 $pb = New-Object System.Windows.Forms.ProgressBar
-$pb.Location = New-Object System.Drawing.Point(132, 342)
-$pb.Size = New-Object System.Drawing.Size(618, 28)
+$pb.Location = New-Object System.Drawing.Point(252, 342)
+$pb.Size = New-Object System.Drawing.Size(498, 28)
 $pb.Style = 'Continuous'
 $pb.Minimum = 0
 $pb.Maximum = 100
@@ -536,7 +632,37 @@ $txtLog.ScrollBars = 'Vertical'
 $txtLog.ReadOnly = $true
 $txtLog.Anchor = 'Top,Left,Right,Bottom'
 
-$form.Controls.AddRange(@($lblDir, $txtDir, $btnBrowse, $lblPlugins, $txtPlugins, $chkUseGit, $chkPnpmInstall, $chkPnpmBuild, $chkBootstrap, $btnInstall, $pb, $lblLog, $txtLog))
+# Tool status labels
+$lblTools = New-Object System.Windows.Forms.Label
+$lblTools.Text = 'Tools:'
+$lblTools.Location = New-Object System.Drawing.Point(12, 75)
+$lblTools.AutoSize = $true
+
+$lblGitStatus = New-Object System.Windows.Forms.Label
+$lblGitStatus.Location = New-Object System.Drawing.Point(70, 75)
+$lblGitStatus.AutoSize = $true
+
+$lblNodeStatus = New-Object System.Windows.Forms.Label
+$lblNodeStatus.Location = New-Object System.Drawing.Point(200, 75)
+$lblNodeStatus.AutoSize = $true
+
+$lblPnpmStatus = New-Object System.Windows.Forms.Label
+$lblPnpmStatus.Location = New-Object System.Drawing.Point(340, 75)
+$lblPnpmStatus.AutoSize = $true
+
+function Update-ToolStatus {
+    param([bool]$Git, [bool]$Node, [bool]$Pnpm)
+    $lblGitStatus.Text = 'Git: ' + ($(if($Git){'Found'}else{'Missing'}))
+    $lblNodeStatus.Text = 'Node: ' + ($(if($Node){'Found'}else{'Missing'}))
+    $lblPnpmStatus.Text = 'pnpm: ' + ($(if($Pnpm){'Found'}else{'Missing'}))
+    $ok = [System.Drawing.Color]::FromArgb(0,128,0)
+    $bad = [System.Drawing.Color]::FromArgb(178,34,34)
+    $lblGitStatus.ForeColor = $(if($Git){$ok}else{$bad})
+    $lblNodeStatus.ForeColor = $(if($Node){$ok}else{$bad})
+    $lblPnpmStatus.ForeColor = $(if($Pnpm){$ok}else{$bad})
+}
+
+$form.Controls.AddRange(@($lblDir, $txtDir, $btnBrowse, $lblTools, $lblGitStatus, $lblNodeStatus, $lblPnpmStatus, $lblPlugins, $txtPlugins, $chkUseGit, $chkPnpmInstall, $chkPnpmBuild, $chkBootstrap, $btnInstall, $btnCancel, $pb, $lblLog, $txtLog))
 
 # Set defaults based on environment
 $documents = [Environment]::GetFolderPath('MyDocuments')
@@ -558,6 +684,18 @@ if ($hasPnpm) {
     $chkPnpmInstall.Text += ' (pnpm may be installed via bootstrap)'
     $chkPnpmBuild.Text += ' (pnpm may be installed via bootstrap)'
 }
+
+# Initial tool status display
+Update-ToolStatus -Git:$hasGit -Node:(Test-CommandAvailable node) -Pnpm:(Test-CommandAvailable pnpm)
+
+# Cancel handler
+$btnCancel.Add_Click({
+    if (-not $script:isInstalling) { $form.Close(); return }
+    $script:cancelRequested = $true
+    $btnCancel.Enabled = $false
+    Write-Log 'Cancellation requested...'
+    try { if ($script:currentProcess -and -not $script:currentProcess.HasExited) { $script:currentProcess.Kill() } } catch {}
+})
 
 # Browse handler
 $btnBrowse.Add_Click({
@@ -585,6 +723,9 @@ $btnInstall.Add_Click({
     $txtLog.Clear()
 
     try {
+        $script:isInstalling = $true
+        $script:cancelRequested = $false
+        $btnCancel.Enabled = $true
         $installDir = $txtDir.Text.Trim()
         if ([string]::IsNullOrWhiteSpace($installDir)) { [System.Windows.Forms.MessageBox]::Show('Please choose an install directory.'); return }
 
@@ -593,6 +734,7 @@ $btnInstall.Add_Click({
     $doBuild = $chkPnpmBuild.Checked
 
         Write-Log "Install directory: $installDir"
+        $script:targetDir = $installDir
         # Ensure directory exists
         if (-not (Test-Path -LiteralPath $installDir)) {
             try { New-Item -ItemType Directory -Path $installDir -Force | Out-Null } catch { [System.Windows.Forms.MessageBox]::Show("Cannot create the install directory."); return }
@@ -613,23 +755,25 @@ $btnInstall.Add_Click({
             }
         }
 
-        $pb.Value = 10
+    Check-Cancel
+    $pb.Value = 10
         [System.Windows.Forms.Application]::DoEvents()
 
-        $ok = $false
-    if ($useGit) { $ok = Clone-Repo -DestinationDir $installDir } else { $ok = Download-RepoZip -DestinationDir $installDir }
+    $ok = $false
+    if ($useGit) { $ok = Get-VencordRepoGit -DestinationDir $installDir } else { $ok = Get-VencordRepoZip -DestinationDir $installDir }
         if (-not $ok) { throw "Failed to retrieve Vencord repository." }
 
-        $pb.Value = 50
+    Check-Cancel
+    $pb.Value = 50
         [System.Windows.Forms.Application]::DoEvents()
 
         # Plugins
         $urls = @()
         if (-not [string]::IsNullOrWhiteSpace($txtPlugins.Text)) {
-            $urls = Extract-UrlsFromText -Text $txtPlugins.Text
+            $urls = Get-UrlsFromText -Text $txtPlugins.Text
             if ($urls.Count -gt 0) {
                 Write-Log "Detected $($urls.Count) plugin link(s)."
-                Download-Plugins -RepoRoot $installDir -PluginUrls $urls
+                Get-PluginRepositories -RepoRoot $installDir -PluginUrls $urls
             } else {
                 Write-Log 'No valid plugin URLs detected.'
             }
@@ -637,7 +781,8 @@ $btnInstall.Add_Click({
             Write-Log 'No custom plugins provided.'
         }
 
-        $pb.Value = 65
+    Check-Cancel
+    $pb.Value = 65
         [System.Windows.Forms.Application]::DoEvents()
 
         # Tools bootstrap (portable Node + pnpm) if requested
@@ -645,15 +790,18 @@ $btnInstall.Add_Click({
             Write-Log 'Checking for Node.js/pnpm and installing portable versions if needed...'
             $toolsStatus = Ensure-PortableNodeAndPnpm -BaseDir $installDir
             Write-Log ("Tools status: Node={0} pnpm={1} corepack={2}" -f $toolsStatus.Node, $toolsStatus.Pnpm, $toolsStatus.Corepack)
+            Update-ToolStatus -Git:$hasGit -Node:(Test-CommandAvailable node) -Pnpm:(Test-CommandAvailable pnpm)
         }
 
-        $pb.Value = 75
+    Check-Cancel
+    $pb.Value = 75
         [System.Windows.Forms.Application]::DoEvents()
 
         # pnpm steps (prefer pnpm, fallback to corepack pnpm)
         if ($doInstall -or $doBuild) {
             if (Test-CommandAvailable pnpm) {
-                Run-PnpmSteps -RepoRoot $installDir -Install:$doInstall -Build:$doBuild
+                Invoke-PnpmSteps -RepoRoot $installDir -Install:$doInstall -Build:$doBuild
+                if ($doBuild) { Start-InjectElevatedConsole -RepoRoot $installDir }
             } elseif (Test-CommandAvailable corepack) {
                 Push-Location $installDir
                 try {
@@ -661,8 +809,7 @@ $btnInstall.Add_Click({
                     if ($doBuild) {
                         Write-Log 'Running: corepack pnpm build'
                         & corepack pnpm build 2>&1 | ForEach-Object { if ($_ -ne '') { Write-Log $_ } }
-                        Write-Log 'Running: corepack pnpm inject'
-                        & corepack pnpm inject 2>&1 | ForEach-Object { if ($_ -ne '') { Write-Log $_ } }
+                        Start-InjectElevatedConsole -RepoRoot $installDir
                     }
                 } catch { Write-Log "ERROR: $($_.Exception.Message)" } finally { Pop-Location }
             } else {
@@ -672,19 +819,41 @@ $btnInstall.Add_Click({
             Write-Log 'Skipping pnpm steps.'
         }
 
+        Check-Cancel
         $pb.Value = 100
         Write-Log 'Done.'
-    [System.Windows.Forms.MessageBox]::Show("Vencord setup complete.`r`n`r`nRepo: $installDir`r`nPlugins folder: src/userplugins")
+        [System.Windows.Forms.MessageBox]::Show("Vencord setup complete.`r`n`r`nRepo: $installDir`r`nPlugins folder: src/userplugins")
     }
     catch {
-        Write-Log "FATAL: $($_.Exception.Message)"
-        [System.Windows.Forms.MessageBox]::Show("An error occurred: $($_.Exception.Message)", 'Error', 'OK', 'Error')
+        $errMsg = $_.Exception.Message
+        if ($errMsg -eq 'CANCELLED') {
+            Write-Log 'Installation cancelled. Performing cleanup...'
+            try { if ($script:targetDir -and (Test-Path $script:targetDir)) { Remove-Item -LiteralPath $script:targetDir -Recurse -Force -ErrorAction SilentlyContinue } } catch {}
+            foreach ($p in $script:tempPaths) { try { if ($p -and (Test-Path $p)) { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue } } catch {} }
+            [System.Windows.Forms.MessageBox]::Show('Installation cancelled. Target directory removed.', 'Cancelled', 'OK', 'Information')
+        } else {
+            Write-Log "FATAL: $errMsg"
+            [System.Windows.Forms.MessageBox]::Show("An error occurred: $errMsg", 'Error', 'OK', 'Error')
+        }
     }
     finally {
         $form.UseWaitCursor = $false
         $btnInstall.Enabled = $true
+        $btnCancel.Enabled = $false
+        $script:isInstalling = $false
+        $script:currentProcess = $null
+        $script:tempPaths.Clear() | Out-Null
     }
 })
 
 $form.Add_Shown({ $form.Activate() })
+[void]($form.add_FormClosing({
+    param($sender,$e)
+    if ($script:isInstalling -and -not $script:cancelRequested) {
+        $script:cancelRequested = $true
+        try { if ($script:currentProcess -and -not $script:currentProcess.HasExited) { $script:currentProcess.Kill() } } catch {}
+        try { if ($script:targetDir -and (Test-Path $script:targetDir)) { Remove-Item -LiteralPath $script:targetDir -Recurse -Force -ErrorAction SilentlyContinue } } catch {}
+        foreach ($p in $script:tempPaths) { try { if ($p -and (Test-Path $p)) { Remove-Item -LiteralPath $p -Recurse -Force -ErrorAction SilentlyContinue } } catch {} }
+    }
+}))
 [void]$form.ShowDialog()
