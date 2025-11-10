@@ -17,6 +17,32 @@ function Test-CommandAvailable {
     return [bool](Get-Command -Name $Name -ErrorAction SilentlyContinue)
 }
 
+function Test-VencordRepo {
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $pkg = Join-Path $Path 'package.json'
+        if (Test-Path -LiteralPath $pkg) {
+            $json = Get-Content -LiteralPath $pkg -Raw -ErrorAction Stop | ConvertFrom-Json
+            if ($null -ne $json -and $json.name -eq 'vencord') { return $true }
+        }
+    } catch {}
+    return $false
+}
+
+function Clear-Directory {
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        Write-Log "Cleaning directory: $Path"
+        Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue | ForEach-Object {
+            try { Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+        }
+        return $true
+    } catch {
+        Write-Log "ERROR cleaning directory '$Path': $($_.Exception.Message)"
+        return $false
+    }
+}
+
 function Write-Log {
     param([string]$Message)
     $timestamp = (Get-Date).ToString('HH:mm:ss')
@@ -231,7 +257,7 @@ function Download-Plugins {
                 try { if (Test-Path $zipFile) { Remove-Item -LiteralPath $zipFile -Force -ErrorAction SilentlyContinue } } catch {}
             }
 
-            # Decide what to copy
+            # Decide what to copy for plugin repository behavior
             $srcPluginsRoot = Join-Path $repoRoot 'src/userplugins'
             if (Test-Path -LiteralPath $srcPluginsRoot) {
                 $pluginDirs = Get-ChildItem -Path $srcPluginsRoot -Directory -ErrorAction SilentlyContinue
@@ -250,21 +276,43 @@ function Download-Plugins {
                 }
             }
 
-            # No src/userplugins structure, copy whole repo contents into a folder named after the repo
-            if (-not $repoName) {
-                try {
-                    $repoName = Split-Path -Leaf $repoRoot
-                    $repoName = ($repoName -replace '-main$','' -replace '-master$','')
-                } catch { $repoName = "repo-$(Get-Random)" }
+            # If index.tsx sits at repo root, treat whole repo as a single plugin <repoName>
+            $indexRoot = Join-Path $repoRoot 'index.tsx'
+            if (Test-Path -LiteralPath $indexRoot) {
+                if (-not $repoName) {
+                    try { $repoName = Split-Path -Leaf $repoRoot } catch { $repoName = "repo-$(Get-Random)" }
+                }
+                $destRoot = Join-Path $pluginsDir $repoName
+                if (Test-Path -LiteralPath $destRoot) { Remove-Item -LiteralPath $destRoot -Recurse -Force -ErrorAction SilentlyContinue }
+                New-Item -ItemType Directory -Path $destRoot -Force | Out-Null
+                Write-Log ("index.tsx found at repo root; copying entire repo as plugin '{0}'." -f $repoName)
+                Get-ChildItem -Path $repoRoot -Force | Where-Object { $_.Name -ne '.git' } | ForEach-Object {
+                    Copy-Item -LiteralPath $_.FullName -Destination $destRoot -Recurse -Force
+                }
+                try { Remove-Item -LiteralPath $repoRoot -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+                continue
             }
-            $destRoot = Join-Path $pluginsDir $repoName
-            if (Test-Path -LiteralPath $destRoot) { Remove-Item -LiteralPath $destRoot -Recurse -Force -ErrorAction SilentlyContinue }
-            New-Item -ItemType Directory -Path $destRoot -Force | Out-Null
-            Write-Log ("Copying entire repository to '{0}'" -f $destRoot)
-            Get-ChildItem -Path $repoRoot -Force | Where-Object { $_.Name -ne '.git' } | ForEach-Object {
-                Copy-Item -LiteralPath $_.FullName -Destination $destRoot -Recurse -Force
+
+            # No userplugins structure and no index.tsx. Offer merge overlay.
+            $confirmMerge = [System.Windows.Forms.MessageBox]::Show("Plugin repo lacks 'src/userplugins' and root 'index.tsx'.\r\nMerge its contents into the main Vencord repository (overlay)?\r\nThis may overwrite existing files.", 'Merge Plugin Repo', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+            if ($confirmMerge -eq [System.Windows.Forms.DialogResult]::Yes) {
+                Write-Log 'Merging plugin repository contents into Vencord root...'
+                Get-ChildItem -Path $repoRoot -Force | Where-Object { $_.Name -ne '.git' } | ForEach-Object {
+                    $target = Join-Path $RepoRoot $_.Name
+                    if (Test-Path -LiteralPath $target) {
+                        # Overwrite existing
+                        try { Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+                    }
+                    Copy-Item -LiteralPath $_.FullName -Destination $RepoRoot -Recurse -Force
+                }
+                Write-Log 'Merge complete.'
+            } else {
+                Write-Log 'Merge declined; skipping this plugin repository.'
             }
             try { Remove-Item -LiteralPath $repoRoot -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+            continue
+            # (Previous fallback copying entire repo into userplugins removed per new requirements)
+            
         }
         catch {
             Write-Log "ERROR processing plugin URL '$clean': $($_.Exception.Message)"
@@ -545,15 +593,22 @@ $btnInstall.Add_Click({
     $doBuild = $chkPnpmBuild.Checked
 
         Write-Log "Install directory: $installDir"
-        if ($useGit) {
-            if (-not (Ensure-Directory-EmptyOrCreate -Path $installDir -RequireEmpty)) {
-                [System.Windows.Forms.MessageBox]::Show("Install directory must be empty for git clone. Choose an empty folder or delete its contents.")
-                return
-            }
-        } else {
-            # For zip, allow non-empty but ensure directory exists
-            if (-not (Ensure-Directory-EmptyOrCreate -Path $installDir)) {
-                [System.Windows.Forms.MessageBox]::Show("Cannot create or access the install directory.")
+        # Ensure directory exists
+        if (-not (Test-Path -LiteralPath $installDir)) {
+            try { New-Item -ItemType Directory -Path $installDir -Force | Out-Null } catch { [System.Windows.Forms.MessageBox]::Show("Cannot create the install directory."); return }
+        }
+
+        # Check if empty; if not empty, handle according to repo detection
+        $existing = Get-ChildItem -LiteralPath $installDir -Force -ErrorAction SilentlyContinue
+        $isEmpty = -not $existing -or ($existing.Count -eq 0)
+        if (-not $isEmpty) {
+            if (Test-VencordRepo -Path $installDir) {
+                $result = [System.Windows.Forms.MessageBox]::Show("Existing Vencord installation detected.\r\n\r\nDo you want to CLEAN the folder (delete ALL contents, including .git) and reinstall?", 'Existing Vencord', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+                if ($result -ne [System.Windows.Forms.DialogResult]::Yes) { Write-Log 'User canceled cleaning.'; return }
+                if (-not (Clear-Directory -Path $installDir)) { [System.Windows.Forms.MessageBox]::Show('Failed to clean directory.'); return }
+                $isEmpty = $true
+            } else {
+                [System.Windows.Forms.MessageBox]::Show("The selected directory is not empty and does not appear to be a Vencord repo.\r\nPlease choose an empty folder or an existing Vencord folder.", 'Not Empty', 'OK', 'Warning')
                 return
             }
         }
@@ -562,7 +617,7 @@ $btnInstall.Add_Click({
         [System.Windows.Forms.Application]::DoEvents()
 
         $ok = $false
-        if ($useGit) { $ok = Clone-Repo -DestinationDir $installDir } else { $ok = Download-RepoZip -DestinationDir $installDir }
+    if ($useGit) { $ok = Clone-Repo -DestinationDir $installDir } else { $ok = Download-RepoZip -DestinationDir $installDir }
         if (-not $ok) { throw "Failed to retrieve Vencord repository." }
 
         $pb.Value = 50
