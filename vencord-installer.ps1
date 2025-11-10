@@ -35,6 +35,104 @@ function Write-Log {
     [System.Windows.Forms.Application]::DoEvents()
 }
 
+# --- Environment refresh helper ---
+function Update-EnvironmentVars {
+    try {
+        $machKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+        $userKey = 'HKCU:\Environment'
+        $mach = Get-ItemProperty -Path $machKey -ErrorAction SilentlyContinue
+        $user = Get-ItemProperty -Path $userKey -ErrorAction SilentlyContinue
+
+        # Merge PATH from machine then user, expanding variables
+        $mPath = if ($mach -and $mach.Path) { [Environment]::ExpandEnvironmentVariables($mach.Path) } else { $null }
+        $uPath = if ($user -and $user.Path) { [Environment]::ExpandEnvironmentVariables($user.Path) } else { $null }
+        $paths = @(); if ($mPath) { $paths += $mPath }; if ($uPath) { $paths += $uPath }
+        if ($paths.Count -gt 0) { $env:Path = ($paths -join ';') }
+
+        # Update other string environment variables (user overrides machine)
+        if ($mach) {
+            foreach ($p in $mach.PSObject.Properties) {
+                if ($p.MemberType -eq 'NoteProperty' -and $p.Name -ne 'Path' -and $p.Value -is [string]) {
+                    $envName = $p.Name
+                    $envValue = [Environment]::ExpandEnvironmentVariables($p.Value)
+                    $ExecutionContext.SessionState.PSVariable.Set(("env:" + $envName), $envValue)
+                }
+            }
+        }
+        if ($user) {
+            foreach ($p in $user.PSObject.Properties) {
+                if ($p.MemberType -eq 'NoteProperty' -and $p.Name -ne 'Path' -and $p.Value -is [string]) {
+                    $envName = $p.Name
+                    $envValue = [Environment]::ExpandEnvironmentVariables($p.Value)
+                    $ExecutionContext.SessionState.PSVariable.Set(("env:" + $envName), $envValue)
+                }
+            }
+        }
+        Write-Log 'Environment refreshed from registry (PATH and variables updated).'
+    } catch {
+        Write-Log "WARN: Failed to refresh environment: $($_.Exception.Message)"
+    }
+}
+
+# --- Process helper: run external tool with output capture and cmd/ps1 support ---
+function Invoke-ExternalTool {
+    param(
+        [Parameter(Mandatory=$true)][string]$Command,
+        [string[]]$Arguments = @(),
+        [string]$WorkingDirectory = $null
+    )
+    $cmdInfo = Get-Command -Name $Command -ErrorAction SilentlyContinue
+    if (-not $cmdInfo) { throw "Command '$Command' not found." }
+    $target = if ($cmdInfo.Path) { $cmdInfo.Path } else { $cmdInfo.Source }
+    if (-not $target) { $target = $Command }
+    $ext = [IO.Path]::GetExtension($target).ToLowerInvariant()
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
+
+    switch ($ext) {
+        '.exe' {
+            $psi.FileName = $target
+            $psi.Arguments = ($Arguments -join ' ')
+        }
+        '.cmd' { 
+            $cmdExe = (Get-Command -Name cmd.exe -ErrorAction SilentlyContinue).Path
+            if (-not $cmdExe) { $cmdExe = 'cmd.exe' }
+            $psi.FileName = $cmdExe
+            $psi.Arguments = '/c ' + '"' + $target + '" ' + ($Arguments -join ' ')
+        }
+        '.bat' {
+            $cmdExe = (Get-Command -Name cmd.exe -ErrorAction SilentlyContinue).Path
+            if (-not $cmdExe) { $cmdExe = 'cmd.exe' }
+            $psi.FileName = $cmdExe
+            $psi.Arguments = '/c ' + '"' + $target + '" ' + ($Arguments -join ' ')
+        }
+        '.ps1' {
+            $pwsh = (Get-Command -Name powershell.exe -ErrorAction SilentlyContinue).Path
+            if (-not $pwsh) { $pwsh = 'powershell.exe' }
+            $psi.FileName = $pwsh
+            $psi.Arguments = '-NoProfile -ExecutionPolicy Bypass -File ' + '"' + $target + '" ' + ($Arguments -join ' ')
+        }
+        default {
+            # Try direct; if it's a shim without extension, this may fail on UseShellExecute=false
+            $psi.FileName = $target
+            $psi.Arguments = ($Arguments -join ' ')
+        }
+    }
+
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    $script:currentProcess = $proc
+    while (-not $proc.HasExited) { Test-CancelRequested; Start-Sleep -Milliseconds 200 }
+    $out = $proc.StandardOutput.ReadToEnd()
+    $err = $proc.StandardError.ReadToEnd()
+    $script:currentProcess = $null
+    return [pscustomobject]@{ ExitCode = $proc.ExitCode; StdOut = $out; StdErr = $err }
+}
+
 # --- Tool resolution helpers ---
 function Resolve-Git {
     param([string]$PathInput)
@@ -247,29 +345,17 @@ function Invoke-PnpmSteps {
     try {
         if ($Install) {
             Write-Log 'Running: pnpm install'
-            $psi = New-Object System.Diagnostics.ProcessStartInfo
-            $psi.FileName = 'pnpm'; $psi.Arguments = 'install'
-            $psi.WorkingDirectory = $RepoRoot
-            $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
-            $p = [System.Diagnostics.Process]::Start($psi); $script:currentProcess = $p
-            while (-not $p.HasExited) { Test-CancelRequested; Start-Sleep -Milliseconds 250 }
-            $out = $p.StandardOutput.ReadToEnd(); $err = $p.StandardError.ReadToEnd(); $script:currentProcess = $null
-            if ($out) { $out -split "`r?`n" | ForEach-Object { if ($_ -ne '') { Write-Log $_ } } }
-            if ($err) { $err -split "`r?`n" | ForEach-Object { if ($_ -ne '') { Write-Log $_ } } }
-            if ($p.ExitCode -ne 0) { throw "pnpm install failed ($($p.ExitCode))" }
+            $result = Invoke-ExternalTool -Command 'pnpm' -Arguments @('install') -WorkingDirectory $RepoRoot
+            if ($result.StdOut) { $result.StdOut -split "`r?`n" | ForEach-Object { if ($_ -ne '') { Write-Log $_ } } }
+            if ($result.StdErr) { $result.StdErr -split "`r?`n" | ForEach-Object { if ($_ -ne '') { Write-Log $_ } } }
+            if ($result.ExitCode -ne 0) { throw "pnpm install failed ($($result.ExitCode))" }
         }
         if ($Build) {
             Write-Log 'Running: pnpm build'
-            $psi = New-Object System.Diagnostics.ProcessStartInfo
-            $psi.FileName = 'pnpm'; $psi.Arguments = 'build'
-            $psi.WorkingDirectory = $RepoRoot
-            $psi.RedirectStandardOutput = $true; $psi.RedirectStandardError = $true; $psi.UseShellExecute = $false; $psi.CreateNoWindow = $true
-            $p = [System.Diagnostics.Process]::Start($psi); $script:currentProcess = $p
-            while (-not $p.HasExited) { Test-CancelRequested; Start-Sleep -Milliseconds 250 }
-            $out = $p.StandardOutput.ReadToEnd(); $err = $p.StandardError.ReadToEnd(); $script:currentProcess = $null
-            if ($out) { $out -split "`r?`n" | ForEach-Object { if ($_ -ne '') { Write-Log $_ } } }
-            if ($err) { $err -split "`r?`n" | ForEach-Object { if ($_ -ne '') { Write-Log $_ } } }
-            if ($p.ExitCode -ne 0) { throw "pnpm build failed ($($p.ExitCode))" }
+            $result = Invoke-ExternalTool -Command 'pnpm' -Arguments @('build') -WorkingDirectory $RepoRoot
+            if ($result.StdOut) { $result.StdOut -split "`r?`n" | ForEach-Object { if ($_ -ne '') { Write-Log $_ } } }
+            if ($result.StdErr) { $result.StdErr -split "`r?`n" | ForEach-Object { if ($_ -ne '') { Write-Log $_ } } }
+            if ($result.ExitCode -ne 0) { throw "pnpm build failed ($($result.ExitCode))" }
         }
         if ($Inject) { Start-InjectElevatedConsole -RepoRoot $RepoRoot }
     } catch { if ($_.Exception.Message -ne 'CANCELLED') { Write-Log "ERROR: $($_.Exception.Message)" } else { throw } } finally { Pop-Location }
@@ -278,6 +364,7 @@ function Invoke-PnpmSteps {
 function Start-InjectElevatedConsole {
     param([string]$RepoRoot)
     try {
+        Update-EnvironmentVars
         $tempScript = Join-Path ([IO.Path]::GetTempPath()) ("vencord-inject-" + (Get-Random) + ".ps1")
         # Preserve current PATH for the elevated process to ensure portable tool resolution
         $parentPath = $env:PATH
@@ -371,9 +458,9 @@ $rowNode.DownloadButton.Add_Click({ Write-Log 'Opening Node.js download page...'
 $rowPnpm.DownloadButton.Add_Click({ Write-Log 'Opening pnpm installation docs...'; Start-Process 'https://pnpm.io/installation' })
 
 # --- Check button handlers ---
-$rowGit.CheckButton.Add_Click({ $status = Resolve-Git -PathInput $rowGit.TextBox.Text; if($status){ Write-Log 'Git ready.' } else { Write-Log 'Git not found.' }; Update-ToolStatusLabels -Git:$status -Node:(Test-CommandAvailable node) -Pnpm:(Test-CommandAvailable pnpm) })
-$rowNode.CheckButton.Add_Click({ $statusNode = Resolve-Node -PathInput $rowNode.TextBox.Text; if($statusNode){ Write-Log "Node.js ready: $(node -v 2>$null)" } else { Write-Log 'Node.js not found.' }; Update-ToolStatusLabels -Git:(Test-CommandAvailable git) -Node:$statusNode -Pnpm:(Test-CommandAvailable pnpm) })
-$rowPnpm.CheckButton.Add_Click({ $statusPnpm = Resolve-Pnpm -PathInput $rowPnpm.TextBox.Text; if($statusPnpm){ Write-Log 'pnpm ready.' } else { Write-Log 'pnpm not found.' }; Update-ToolStatusLabels -Git:(Test-CommandAvailable git) -Node:(Test-CommandAvailable node) -Pnpm:$statusPnpm })
+$rowGit.CheckButton.Add_Click({ Update-EnvironmentVars; $status = Resolve-Git -PathInput $rowGit.TextBox.Text; if($status){ Write-Log 'Git ready.' } else { Write-Log 'Git not found.' }; Update-ToolStatusLabels -Git:$status -Node:(Test-CommandAvailable node) -Pnpm:(Test-CommandAvailable pnpm) })
+$rowNode.CheckButton.Add_Click({ Update-EnvironmentVars; $statusNode = Resolve-Node -PathInput $rowNode.TextBox.Text; if($statusNode){ Write-Log "Node.js ready: $(node -v 2>$null)" } else { Write-Log 'Node.js not found.' }; Update-ToolStatusLabels -Git:(Test-CommandAvailable git) -Node:$statusNode -Pnpm:(Test-CommandAvailable pnpm) })
+$rowPnpm.CheckButton.Add_Click({ Update-EnvironmentVars; $statusPnpm = Resolve-Pnpm -PathInput $rowPnpm.TextBox.Text; if($statusPnpm){ Write-Log 'pnpm ready.' } else { Write-Log 'pnpm not found.' }; Update-ToolStatusLabels -Git:(Test-CommandAvailable git) -Node:(Test-CommandAvailable node) -Pnpm:$statusPnpm })
 
 # Enforce consecutive checkbox logic
 $chkPnpmInstall.Add_CheckedChanged({ if (-not $chkPnpmInstall.Checked) { $chkPnpmBuild.Checked = $false; $chkPnpmInject.Checked = $false } })
@@ -392,6 +479,7 @@ $btnCancel.Add_Click({ if (-not $script:isInstalling) { $form.Close(); return };
 
 # Install handler
 $btnInstall.Add_Click({
+    Update-EnvironmentVars
     $btnInstall.Enabled = $false; $btnCancel.Enabled = $true; $script:isInstalling = $true; $script:cancelRequested = $false
     $txtLog.Clear(); Write-Log 'Beginning installation...'
     try {
