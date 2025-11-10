@@ -61,6 +61,25 @@ function ConvertTo-RawGithubUrl {
     return $Url
 }
 
+# Parse GitHub repository info from a URL
+function Get-GitHubRepoInfo {
+    param([Parameter(Mandatory)][string]$Url)
+    try {
+        $u = [Uri]$Url
+    } catch { return $null }
+    if ($u.Host -notmatch 'github.com') { return $null }
+    $path = $u.AbsolutePath.Trim('/')
+    $segments = $path.Split('/')
+    if ($segments.Length -lt 2) { return $null }
+    $owner = $segments[0]
+    $repo = ($segments[1] -replace '\.git$','')
+    $branch = $null
+    if ($segments.Length -ge 4 -and $segments[2] -ieq 'tree') {
+        $branch = $segments[3]
+    }
+    return [pscustomobject]@{ Owner = $owner; Repo = $repo; Branch = $branch }
+}
+
 function Download-RepoZip {
     param(
         [Parameter(Mandatory)][string]$DestinationDir
@@ -137,18 +156,118 @@ function Download-Plugins {
     foreach ($url in $PluginUrls) {
         $clean = $url.Trim()
         if (-not $clean) { continue }
-            $rawUrl = ConvertTo-RawGithubUrl -Url $clean
         try {
-            $uri = [Uri]$rawUrl
-            $fileName = [System.IO.Path]::GetFileName($uri.AbsolutePath)
-            if (-not $fileName) { $fileName = "plugin-$(Get-Random).ts" }
-            $outFile = Join-Path $pluginsDir $fileName
-            Write-Log "Downloading plugin: $rawUrl"
-            Invoke-WebRequest -Uri $rawUrl -OutFile $outFile -UseBasicParsing
-            Write-Log "Saved plugin to 'src/userplugins/$fileName'"
+            # If the URL looks like a raw file or a blob link, download the single file as before
+            $rawCandidate = ConvertTo-RawGithubUrl -Url $clean
+            $isFile = $false
+            try { $u2 = [Uri]$rawCandidate; if ($u2.Host -ieq 'raw.githubusercontent.com' -or $clean -match '/blob/') { $isFile = $true } } catch {}
+            if ($isFile) {
+                $fileName = [IO.Path]::GetFileName(([Uri]$rawCandidate).AbsolutePath)
+                if (-not $fileName) { $fileName = "plugin-$(Get-Random).ts" }
+                $outFile = Join-Path $pluginsDir $fileName
+                Write-Log "Downloading plugin file: $rawCandidate"
+                Invoke-WebRequest -Uri $rawCandidate -OutFile $outFile -UseBasicParsing
+                Write-Log "Saved plugin to 'src/userplugins/$fileName'"
+                continue
+            }
+
+            # Treat as a repository
+            $info = Get-GitHubRepoInfo -Url $clean
+            $repoName = $null
+            $tempBase = Join-Path ([IO.Path]::GetTempPath()) ("vencord-plugin-" + (Get-Random))
+            New-Item -ItemType Directory -Path $tempBase -Force | Out-Null
+            $repoRoot = $null
+            $useGitHere = $false
+            if ($info) { $repoName = $info.Repo }
+            if (Test-CommandAvailable git) { $useGitHere = $true }
+
+            if ($useGitHere) {
+                # Clone shallow
+                $cloneArgs = @('clone','--depth','1')
+                if ($info -and $info.Branch) { $cloneArgs += @('-b', $info.Branch) }
+                $cloneArgs += @($clean, $tempBase)
+                Write-Log ("Cloning plugin repo with git: {0}" -f $clean)
+                $psi = New-Object System.Diagnostics.ProcessStartInfo
+                $psi.FileName = 'git'
+                $psi.Arguments = ($cloneArgs -join ' ')
+                $psi.RedirectStandardOutput = $true
+                $psi.RedirectStandardError = $true
+                $psi.UseShellExecute = $false
+                $psi.CreateNoWindow = $true
+                $p = [System.Diagnostics.Process]::Start($psi)
+                $stdout = $p.StandardOutput.ReadToEnd()
+                $stderr = $p.StandardError.ReadToEnd()
+                $p.WaitForExit()
+                if ($stdout) { $stdout -split "`r?`n" | ForEach-Object { if ($_ -ne '') { Write-Log $_ } } }
+                if ($stderr) { $stderr -split "`r?`n" | ForEach-Object { if ($_ -ne '') { Write-Log $_ } } }
+                if ($p.ExitCode -ne 0) { throw "git clone failed ($($p.ExitCode))" }
+                $repoRoot = $tempBase
+                if (-not $repoName) {
+                    try { $repoName = Split-Path -Leaf $repoRoot } catch {}
+                }
+            } else {
+                # Download zip from GitHub
+                if (-not $info) { throw "Non-GitHub repo and no Git available. Can't download: $clean" }
+                $branches = @()
+                if ($info.Branch) { $branches = @($info.Branch) } else { $branches = @('main','master') }
+                $zipFile = Join-Path ([IO.Path]::GetTempPath()) ("$($info.Owner)-$($info.Repo)-$(Get-Random).zip")
+                $exDir = Join-Path ([IO.Path]::GetTempPath()) ("extract-" + (Get-Random))
+                New-Item -ItemType Directory -Path $exDir -Force | Out-Null
+                $downloaded = $false
+                foreach ($br in $branches) {
+                    $zipUrl = "https://codeload.github.com/$($info.Owner)/$($info.Repo)/zip/refs/heads/$br"
+                    try {
+                        Write-Log "Downloading plugin repo zip: $zipUrl"
+                        Invoke-WebRequest -Uri $zipUrl -OutFile $zipFile -UseBasicParsing -ErrorAction Stop
+                        $downloaded = $true; break
+                    } catch { Write-Log "Zip for branch '$br' unavailable: $($_.Exception.Message)" }
+                }
+                if (-not $downloaded) { throw "Could not download repo zip for any branch (tried: $($branches -join ', '))" }
+                Write-Log 'Extracting plugin repo archive...'
+                Expand-Archive -Path $zipFile -DestinationPath $exDir -Force
+                $rootFolder = Get-ChildItem -Path $exDir -Directory | Select-Object -First 1
+                if (-not $rootFolder) { throw 'Could not locate repo contents after extraction' }
+                $repoRoot = $rootFolder.FullName
+                try { if (Test-Path $zipFile) { Remove-Item -LiteralPath $zipFile -Force -ErrorAction SilentlyContinue } } catch {}
+            }
+
+            # Decide what to copy
+            $srcPluginsRoot = Join-Path $repoRoot 'src/userplugins'
+            if (Test-Path -LiteralPath $srcPluginsRoot) {
+                $pluginDirs = Get-ChildItem -Path $srcPluginsRoot -Directory -ErrorAction SilentlyContinue
+                if ($pluginDirs -and $pluginDirs.Count -gt 0) {
+                    foreach ($pd in $pluginDirs) {
+                        $name = $pd.Name
+                        $dest = Join-Path $pluginsDir $name
+                        if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction SilentlyContinue }
+                        Write-Log ("Copying plugin folder '{0}' from repo to '{1}'" -f $name, (Resolve-Path $pluginsDir))
+                        Copy-Item -LiteralPath $pd.FullName -Destination $dest -Recurse -Force
+                    }
+                    # Cleanup temp
+                    try { if ($useGitHere) { Remove-Item -LiteralPath (Join-Path $repoRoot '.git') -Recurse -Force -ErrorAction SilentlyContinue } } catch {}
+                    try { Remove-Item -LiteralPath $repoRoot -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+                    continue
+                }
+            }
+
+            # No src/userplugins structure, copy whole repo contents into a folder named after the repo
+            if (-not $repoName) {
+                try {
+                    $repoName = Split-Path -Leaf $repoRoot
+                    $repoName = ($repoName -replace '-main$','' -replace '-master$','')
+                } catch { $repoName = "repo-$(Get-Random)" }
+            }
+            $destRoot = Join-Path $pluginsDir $repoName
+            if (Test-Path -LiteralPath $destRoot) { Remove-Item -LiteralPath $destRoot -Recurse -Force -ErrorAction SilentlyContinue }
+            New-Item -ItemType Directory -Path $destRoot -Force | Out-Null
+            Write-Log ("Copying entire repository to '{0}'" -f $destRoot)
+            Get-ChildItem -Path $repoRoot -Force | Where-Object { $_.Name -ne '.git' } | ForEach-Object {
+                Copy-Item -LiteralPath $_.FullName -Destination $destRoot -Recurse -Force
+            }
+            try { Remove-Item -LiteralPath $repoRoot -Recurse -Force -ErrorAction SilentlyContinue } catch {}
         }
         catch {
-            Write-Log "ERROR downloading plugin '$clean': $($_.Exception.Message)"
+            Write-Log "ERROR processing plugin URL '$clean': $($_.Exception.Message)"
         }
     }
 }
@@ -500,7 +619,7 @@ $btnInstall.Add_Click({
 
         $pb.Value = 100
         Write-Log 'Done.'
-        [System.Windows.Forms.MessageBox]::Show("Vencord setup complete.\n\nRepo: $installDir\nPlugins folder: src/userplugins")
+    [System.Windows.Forms.MessageBox]::Show("Vencord setup complete.`r`n`r`nRepo: $installDir`r`nPlugins folder: src/userplugins")
     }
     catch {
         Write-Log "FATAL: $($_.Exception.Message)"
