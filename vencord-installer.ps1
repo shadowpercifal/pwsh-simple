@@ -83,46 +83,27 @@ function Invoke-ExternalTool {
     )
     $cmdInfo = Get-Command -Name $Command -ErrorAction SilentlyContinue
     if (-not $cmdInfo) { throw "Command '$Command' not found." }
-    $target = if ($cmdInfo.Path) { $cmdInfo.Path } else { $cmdInfo.Source }
-    if (-not $target) { $target = $Command }
-    $ext = [IO.Path]::GetExtension($target).ToLowerInvariant()
+
+    # Always execute through powershell.exe to resolve commands via PowerShell's command discovery
+    # This avoids .cmd/.bat extension issues when UseShellExecute=false and preserves output capture.
+    $pwsh = (Get-Command -Name powershell.exe -ErrorAction SilentlyContinue).Path
+    if (-not $pwsh) { $pwsh = 'powershell.exe' }
+
+    # Properly escape single quotes inside arguments for embedding in a single-quoted PowerShell command string
+    $escape = { param($s) return ($s -replace "'", "''") }
+    $cmdEsc = & $escape $Command
+    $argsEsc = $Arguments | ForEach-Object { "'" + (& $escape $_) + "'" } -join ' '
+
+    $prefix = if ($WorkingDirectory) { "Set-Location -LiteralPath '" + (& $escape $WorkingDirectory) + "'; " } else { '' }
+    $cmdLine = $prefix + "& '" + $cmdEsc + "' " + $argsEsc + "; exit $LASTEXITCODE"
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
     $psi.CreateNoWindow = $true
-    if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
-
-    switch ($ext) {
-        '.exe' {
-            $psi.FileName = $target
-            $psi.Arguments = ($Arguments -join ' ')
-        }
-        '.cmd' { 
-            $cmdExe = (Get-Command -Name cmd.exe -ErrorAction SilentlyContinue).Path
-            if (-not $cmdExe) { $cmdExe = 'cmd.exe' }
-            $psi.FileName = $cmdExe
-            $psi.Arguments = '/c ' + '"' + $target + '" ' + ($Arguments -join ' ')
-        }
-        '.bat' {
-            $cmdExe = (Get-Command -Name cmd.exe -ErrorAction SilentlyContinue).Path
-            if (-not $cmdExe) { $cmdExe = 'cmd.exe' }
-            $psi.FileName = $cmdExe
-            $psi.Arguments = '/c ' + '"' + $target + '" ' + ($Arguments -join ' ')
-        }
-        '.ps1' {
-            $pwsh = (Get-Command -Name powershell.exe -ErrorAction SilentlyContinue).Path
-            if (-not $pwsh) { $pwsh = 'powershell.exe' }
-            $psi.FileName = $pwsh
-            $psi.Arguments = '-NoProfile -ExecutionPolicy Bypass -File ' + '"' + $target + '" ' + ($Arguments -join ' ')
-        }
-        default {
-            # Try direct; if it's a shim without extension, this may fail on UseShellExecute=false
-            $psi.FileName = $target
-            $psi.Arguments = ($Arguments -join ' ')
-        }
-    }
+    $psi.FileName = $pwsh
+    $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command \"$cmdLine\""
 
     $proc = [System.Diagnostics.Process]::Start($psi)
     $script:currentProcess = $proc
@@ -358,7 +339,7 @@ function Invoke-PnpmSteps {
             if ($result.ExitCode -ne 0) { throw "pnpm build failed ($($result.ExitCode))" }
         }
         if ($Inject) { Start-InjectElevatedConsole -RepoRoot $RepoRoot }
-    } catch { if ($_.Exception.Message -ne 'CANCELLED') { Write-Log "ERROR: $($_.Exception.Message)" } else { throw } } finally { Pop-Location }
+    } catch { if ($_.Exception.Message -ne 'CANCELLED') { Write-Log "ERROR: $($_.Exception.Message)"; throw } else { throw } } finally { Pop-Location }
 }
 
 function Start-InjectElevatedConsole {
