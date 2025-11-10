@@ -84,8 +84,6 @@ function Invoke-ExternalTool {
     $cmdInfo = Get-Command -Name $Command -ErrorAction SilentlyContinue
     if (-not $cmdInfo) { throw "Command '$Command' not found." }
     $path = $cmdInfo.Path
-    $isAliasOrFunction = $false
-    if (-not $path) { $isAliasOrFunction = $true }
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.RedirectStandardOutput = $true
@@ -94,24 +92,51 @@ function Invoke-ExternalTool {
     $psi.CreateNoWindow = $true
     if ($WorkingDirectory) { $psi.WorkingDirectory = $WorkingDirectory }
 
-    if ($isAliasOrFunction) {
-        # Fall back to launching via powershell to resolve alias/function
-        $pwsh = (Get-Command -Name powershell.exe -ErrorAction SilentlyContinue).Path
-        if (-not $pwsh) { $pwsh = 'powershell.exe' }
-        $joinedArgs = $Arguments | ForEach-Object { if ($_ -match '\s') { '"' + ($_ -replace '"','\"') + '"' } else { $_ } } | ForEach-Object { $_ } -join ' '
-        $locPrefix = if ($WorkingDirectory) { "Set-Location -LiteralPath '" + ($WorkingDirectory -replace "'", "''") + "'; " } else { '' }
-        $commandLine = $locPrefix + "& $Command $joinedArgs; exit $LASTEXITCODE"
-        $psi.FileName = $pwsh
-        $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command \"$commandLine\""
-    } else {
+    # Helper: quote arguments that contain spaces or quotes for process invocation
+    $joinedArgs = ($Arguments | ForEach-Object {
+        if ($_ -match '"') { '"' + ($_ -replace '"', '\"') + '"' }
+        elseif ($_ -match '\s') { '"' + $_ + '"' } else { $_ }
+    }) -join ' '
+
+    if ($path) {
         $ext = [IO.Path]::GetExtension($path).ToLowerInvariant()
-        $joinedArgs = $Arguments | ForEach-Object { if ($_ -match '\s') { '"' + ($_ -replace '"','\"') + '"' } else { $_ } } | ForEach-Object { $_ } -join ' '
         switch ($ext) {
-            '.cmd' { $cmdExe = (Get-Command cmd.exe -ErrorAction SilentlyContinue).Path; if (-not $cmdExe) { $cmdExe = 'cmd.exe' }; $psi.FileName = $cmdExe; $psi.Arguments = "/c \"$path\" $joinedArgs" }
-            '.bat' { $cmdExe = (Get-Command cmd.exe -ErrorAction SilentlyContinue).Path; if (-not $cmdExe) { $cmdExe = 'cmd.exe' }; $psi.FileName = $cmdExe; $psi.Arguments = "/c \"$path\" $joinedArgs" }
-            '.ps1' { $pwsh = (Get-Command powershell.exe -ErrorAction SilentlyContinue).Path; if (-not $pwsh) { $pwsh = 'powershell.exe' }; $psi.FileName = $pwsh; $psi.Arguments = "-NoProfile -ExecutionPolicy Bypass -File \"$path\" $joinedArgs" }
-            default { $psi.FileName = $path; $psi.Arguments = $joinedArgs }
+            '.cmd' {
+                $cmdExe = (Get-Command cmd.exe -ErrorAction SilentlyContinue).Path; if (-not $cmdExe) { $cmdExe = 'cmd.exe' }
+                $psi.FileName = $cmdExe
+                $psi.Arguments = '/c "' + $path + '" ' + $joinedArgs
+            }
+            '.bat' {
+                $cmdExe = (Get-Command cmd.exe -ErrorAction SilentlyContinue).Path; if (-not $cmdExe) { $cmdExe = 'cmd.exe' }
+                $psi.FileName = $cmdExe
+                $psi.Arguments = '/c "' + $path + '" ' + $joinedArgs
+            }
+            '.ps1' {
+                $pwsh = (Get-Command powershell.exe -ErrorAction SilentlyContinue).Path; if (-not $pwsh) { $pwsh = 'powershell.exe' }
+                $psi.FileName = $pwsh
+                $psi.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $path + '" ' + $joinedArgs
+            }
+            default {
+                $psi.FileName = $path
+                $psi.Arguments = $joinedArgs
+            }
         }
+    } else {
+        # Alias/function fallback: write a temporary script to avoid complex -Command quoting
+        $tempScript = Join-Path ([IO.Path]::GetTempPath()) ("run-" + ([IO.Path]::GetRandomFileName()) + ".ps1")
+        $lines = @()
+        if ($WorkingDirectory) { $lines += "Set-Location -LiteralPath '" + ($WorkingDirectory -replace "'", "''") + "'" }
+        $call = '& ' + $Command
+        if ($Arguments.Count -gt 0) {
+            $argLine = ($Arguments | ForEach-Object { '"' + ($_ -replace '"','`"') + '"' }) -join ' '
+            $call += ' ' + $argLine
+        }
+        $lines += $call
+        $lines += 'exit $LASTEXITCODE'
+        Set-Content -LiteralPath $tempScript -Value ($lines -join [Environment]::NewLine) -Encoding UTF8
+        $pwsh = (Get-Command powershell.exe -ErrorAction SilentlyContinue).Path; if (-not $pwsh) { $pwsh = 'powershell.exe' }
+        $psi.FileName = $pwsh
+        $psi.Arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $tempScript + '"'
     }
 
     $proc = [System.Diagnostics.Process]::Start($psi)
